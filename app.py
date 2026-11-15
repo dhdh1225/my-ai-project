@@ -527,6 +527,20 @@ def list_projects():
 
 
 # ───────────────────────── 결과 보조 ─────────────────────────
+def current_image_model() -> str:
+    """이미지 모델 ID 칸이 비어 있으면 선택한 모델의 기본 ID를 쓴다."""
+    st_ = st.session_state
+    label = st_.get("model_label")
+    if label not in IMAGE_MODELS:
+        label = next(iter(IMAGE_MODELS))
+    return (st_.get(f"mid_{label}") or "").strip() or IMAGE_MODELS[label]
+
+
+def current_text_model() -> str:
+    """텍스트 모델 칸이 비어 있으면 기본 텍스트 모델을 쓴다."""
+    return (st.session_state.get("text_model") or "").strip() or DEFAULT_TEXT_MODEL
+
+
 def current_psig() -> str:
     """프롬프트를 만들 때 쓴 스타일·규칙·언어·모델의 서명. 바뀌면 그 장면 프롬프트는 낡은 것으로 본다."""
     st_ = st.session_state
@@ -569,13 +583,13 @@ def _ensure_prompt(sc):
         return
     client = get_client(st_.api_key)
     if not st_.analysis:
-        st_.analysis = analyze_script(client, st_.text_model, st_.script)
+        st_.analysis = analyze_script(client, current_text_model(), st_.script)
         st_.analysis_hash = script_hash(st_.script)
-    descs = build_scene_descriptions(client, st_.text_model, st_.analysis or {}, [sc], st_.format_prompt, st_.lang)
+    descs = build_scene_descriptions(client, current_text_model(), st_.analysis or {}, [sc], st_.format_prompt, st_.lang)
     desc = descs.get(sc["idx"]) or sc["text"]
     sc["desc"], sc["prompt"], sc["psig"] = desc, compose_prompt(st_.style, desc), current_psig()
     if st_.get("motion_auto"):
-        res = build_motion_prompts(client, st_.text_model, st_.analysis, [sc], st_.motion_rule)
+        res = build_motion_prompts(client, current_text_model(), st_.analysis, [sc], st_.motion_rule)
         base = res.get(sc["idx"]) or "Slow gentle zoom in, subtle ambient movement, keep the illustration style unchanged."
         sc["motion"] = ensure_silent(base, st_.silent_rule)
 
@@ -603,7 +617,7 @@ def _regen_inline(img_slot, sc):
         st.markdown(f'<div class="ph busy">🔄<br>{msg}<br><small>GENERATING AI VISION</small></div>',
                     unsafe_allow_html=True)
     sc["gen_prompt"] = compose_gen_prompt(sc)
-    img, err = generate_one(get_client(st_.api_key), st_[f"mid_{st_.model_label}"], sc["gen_prompt"],
+    img, err = generate_one(get_client(st_.api_key), current_image_model(), sc["gen_prompt"],
                             st_.aspect, st_.refs, Throttle(1))
     if img:
         sc["image"] = img
@@ -1038,6 +1052,8 @@ def load_project():
     for k, v in (data.get("inputs") or {}).items():
         if v is None or k not in INPUT_KEYS:
             continue
+        if (k.startswith("mid_") or k == "text_model") and not str(v).strip():
+            continue  # 비어 있는 모델 이름은 불러오지 않는다 (기본값 사용)
         if k == "sec" and v not in SCENE_SECONDS:
             continue
         if k == "lang" and v not in IMAGE_LANGS:
@@ -1114,8 +1130,9 @@ with st.sidebar:
                       "해당 언어로 허용하고 자막·로고·말풍선은 계속 금지합니다.")
 
     with st.expander(":material/tune: 고급 설정"):
-        st.text_input("이미지 모델 ID", key=f"mid_{ss.model_label}", help="모델 ID가 바뀌면 여기서 수정하세요.")
-        st.text_input("분석·프롬프트화 텍스트 모델", key="text_model",
+        st.text_input("이미지 모델 ID", key=f"mid_{ss.model_label}", placeholder=IMAGE_MODELS[ss.model_label],
+                      help="모델 ID가 바뀌면 여기서 수정하세요. 비워 두면 기본값(회색 글씨)을 씁니다.")
+        st.text_input("분석·프롬프트화 텍스트 모델", key="text_model", placeholder=DEFAULT_TEXT_MODEL,
                       help="모델이 단종되면 쓸 수 있는 다른 모델로 자동 전환을 시도합니다.")
         if st.button(":material/list: 사용 가능한 모델 보기", key="list_models", width="stretch",
                      help="이 API 키로 실제 호출할 수 있는 모델 이름을 조회합니다."):
@@ -1154,8 +1171,9 @@ with st.sidebar:
         c_l.button(":material/folder_open: 불러오기", width="stretch", on_click=load_project)
 
 api_key = ss.api_key
-model_label, text_model, aspect = ss.model_label, ss.text_model, ss.aspect
-model_id = ss[f"mid_{model_label}"]
+model_label, aspect = ss.model_label, ss.aspect
+text_model = current_text_model()
+model_id = current_image_model()
 sec_per_scene, cps, image_lang, workers = ss.sec, ss.cps, ss.lang, ss.workers
 
 # ───────────────────────── 메인 입력 ─────────────────────────
