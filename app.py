@@ -510,50 +510,63 @@ def make_srt(scenes) -> bytes:
 
 
 # ───────────────────────── 앱 ─────────────────────────
-st.set_page_config(page_title="대본 → 이미지 생성기", page_icon="🌸", layout="wide")
+st.set_page_config(page_title="대본 → 이미지 생성기", page_icon="🖼️", layout="wide")
 ss = st.session_state
 
-PINK_CSS = """
+# 색은 아래 :root 변수만 바꾸면 전체 화면에 반영됩니다.
+THEME_CSS = """
 <style>
-.stApp { background: linear-gradient(180deg, #fff1f6 0%, #ffe4ee 100%); color: #4a2c3a; }
+@import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css');
+:root {
+  --bg: #ffffff;            /* 본문 배경 */
+  --side: #fcf1ee;          /* 사이드바 배경 (아주 연한 살구) */
+  --soft: #f9dcd7;          /* 포인트 살구 (참고색) */
+  --accent: #d9958a;        /* 강조 (더스티 살구) */
+  --accent-deep: #b8695d;   /* 강조 진한 톤 */
+  --cta: #efb9ad;           /* 주요 버튼 */
+  --text: #3d3330;          /* 글씨 (따뜻한 차콜) */
+  --muted: #8a7a76;         /* 보조 글씨 */
+  --line: #eadcd8;          /* 테두리 */
+}
+html, body, .stApp, .stApp *:not([data-testid="stIconMaterial"]):not([class*="material" i]):not([class*="icon" i]) {
+  font-family: 'Pretendard', -apple-system, 'Segoe UI', 'Noto Sans KR', sans-serif; }
+.stApp { background: var(--bg); color: var(--text); }
 [data-testid="stHeader"] { background: transparent; }
-[data-testid="stSidebar"] { background: linear-gradient(180deg, #ffe9f1 0%, #ffdce8 100%);
-    border-right: 1px solid #f8c9d9; }
-h1, h2, h3 { color: #b83b6b !important; letter-spacing: -0.01em; }
-h1 { text-shadow: 0 2px 0 #ffd9e6; }
-[data-testid="stCaptionContainer"], .stCaption { color: #8a4a64 !important; }
+[data-testid="stSidebar"] { background: var(--side); border-right: 1px solid var(--line); }
+h1, h2, h3 { color: var(--text) !important; letter-spacing: -0.02em; font-weight: 700; }
+h1 { border-bottom: 3px solid var(--soft); padding-bottom: .35rem; display: inline-block; }
+[data-testid="stCaptionContainer"], .stCaption { color: var(--muted) !important; }
 
 /* 버튼 */
 .stButton > button, .stDownloadButton > button {
-    background: #ffffff; color: #a2335f; border: 1px solid #f4a6c0; border-radius: 12px;
-    transition: all .15s ease; box-shadow: 0 1px 0 #f8d3e1; }
+    background: #fff; color: var(--text); border: 1px solid var(--line); border-radius: 10px;
+    transition: all .15s ease; font-weight: 500; }
 .stButton > button:hover, .stDownloadButton > button:hover {
-    background: #ffd6e5; border-color: #ee7ca3; color: #8c2250; transform: translateY(-1px); }
+    background: var(--side); border-color: var(--accent); color: var(--accent-deep); }
 .stButton > button[kind="primary"] {
-    background: linear-gradient(135deg, #ff9fc2 0%, #f06292 100%); color: #fff; border: none;
-    box-shadow: 0 3px 10px rgba(240, 98, 146, .35); }
-.stButton > button[kind="primary"]:hover { filter: brightness(1.05); color: #fff; }
+    background: var(--cta); color: #4a241d; border: 1px solid var(--cta); font-weight: 600;
+    box-shadow: 0 2px 8px rgba(217, 149, 138, .28); }
+.stButton > button[kind="primary"]:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
 
 /* 입력창 */
-textarea, input { background: #ffffff !important; color: #4a2c3a !important; }
+textarea, input { background: #fff !important; color: var(--text) !important; }
 [data-baseweb="textarea"], [data-baseweb="input"], [data-baseweb="base-input"] {
-    background: #ffffff !important; border-radius: 12px !important; border-color: #f4c2d3 !important; }
+    background: #fff !important; border-radius: 10px !important; border-color: var(--line) !important; }
 [data-baseweb="textarea"]:focus-within, [data-baseweb="input"]:focus-within {
-    border-color: #f06292 !important; box-shadow: 0 0 0 2px rgba(240, 98, 146, .18) !important; }
-[data-baseweb="select"] > div { background: #ffffff !important; border-radius: 12px !important;
-    border-color: #f4c2d3 !important; }
-[data-testid="stFileUploaderDropzone"] { background: #fff2f7; border: 1px dashed #f19ab9; border-radius: 14px; }
+    border-color: var(--accent) !important; box-shadow: 0 0 0 3px rgba(217, 149, 138, .18) !important; }
+[data-baseweb="select"] > div { background: #fff !important; border-radius: 10px !important; border-color: var(--line) !important; }
+[data-testid="stFileUploaderDropzone"] { background: #fffaf8; border: 1px dashed #e5c8c1; border-radius: 12px; }
 
-/* 확장 패널 · 표 · 진행바 · 슬라이더 */
-[data-testid="stExpander"] { background: #fff9fb; border: 1px solid #f8c9d9; border-radius: 14px; }
-[data-testid="stDataFrame"], [data-testid="stDataEditor"] { border-radius: 12px; border: 1px solid #f8c9d9; }
-.stProgress > div > div > div > div { background-color: #f06292 !important; }
-[data-testid="stSlider"] [role="slider"] { background-color: #f06292 !important; }
-[data-testid="stImage"] img { border-radius: 12px; box-shadow: 0 2px 8px rgba(240, 98, 146, .18); }
-hr { border-color: #f8c9d9 !important; }
+/* 확장 패널 · 표 · 진행바 · 슬라이더 · 이미지 */
+[data-testid="stExpander"] { background: #fff; border: 1px solid var(--line); border-radius: 12px; }
+[data-testid="stDataFrame"], [data-testid="stDataEditor"] { border-radius: 10px; border: 1px solid var(--line); }
+.stProgress > div > div > div > div { background-color: var(--accent) !important; }
+[data-testid="stSlider"] [role="slider"] { background-color: var(--accent) !important; }
+[data-testid="stImage"] img { border-radius: 10px; box-shadow: 0 2px 10px rgba(61, 51, 48, .10); }
+hr { border-color: var(--line) !important; }
 </style>
 """
-st.markdown(PINK_CSS, unsafe_allow_html=True)
+st.markdown(THEME_CSS, unsafe_allow_html=True)
 
 
 def _default_api_key() -> str:
@@ -739,7 +752,7 @@ model_id = ss[f"mid_{model_label}"]
 sec_per_scene, cps, image_lang, workers = ss.sec, ss.cps, ss.lang, ss.workers
 
 # ───────────────────────── 메인 입력 ─────────────────────────
-st.title("🌸 대본 → 이미지 자동 생성기")
+st.title("🖼️ 대본 → 이미지 자동 생성기")
 st.caption("대본분석 → 초 단위 분할 → 이미지 프롬프트화 → 이미지 병렬 생성 (Gemini API)")
 
 col_a, col_b = st.columns([3, 2])
@@ -797,9 +810,9 @@ run_all = b1.button("🚀 전체 자동 실행", type="primary", width="stretch"
 run1 = b2.button("1 대본 분석", width="stretch")
 run2 = b3.button("2 초 단위 분할", width="stretch")
 run3 = b4.button("3 프롬프트화", width="stretch")
-run4 = b5.button("4 이미지 생성(이어서)", width="stretch",
-                 help="이미 만든 이미지는 건너뛰고 없는 장면만 생성합니다.")
-run6 = b6.button("5 애니메이션 프롬프트", width="stretch", help="장면별 이미지-투-비디오용 움직임 지시문을 만듭니다.")
+run4 = b5.button("4 이미지 생성", width="stretch",
+                 help="이어서 생성: 이미 만든 이미지는 건너뛰고 없는 장면만 생성합니다.")
+run6 = b6.button("5 움직임 프롬프트", width="stretch", help="장면별 이미지-투-비디오용 움직임 지시문을 만듭니다.")
 t1, t2, t3, t4 = st.columns([1, 1, 1, 1])
 ss.test_no = min(max(1, int(ss.test_no)), max(1, len(ss.scenes)))
 test_no = t1.number_input("테스트 장면 번호", 1, max(1, len(ss.scenes)), key="test_no")
