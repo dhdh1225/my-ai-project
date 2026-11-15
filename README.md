@@ -12,7 +12,7 @@ CSV/JSON 목록에 적어 둔 영상을 YouTube Data API로 일괄 업로드합�
 
 ## 사용법
 ```bash
-pip install -r requirements.txt
+pip install -r requirements-youtube.txt
 cp queue.example.csv queue.csv   # 내용 수정
 python main.py upload queue.csv --dry-run   # 검증
 python main.py upload queue.csv             # 실제 업로드
@@ -41,7 +41,7 @@ python main.py stats                        # 채널 통계
 Streamlit 단일 파일 앱. 대본을 넣으면 **대본 분석 → 초 단위 분할 → 이미지 프롬프트화 → 이미지 병렬 생성**을 자동으로 진행합니다 (Gemini API).
 
 ```bash
-pip install -r requirements-app.txt
+pip install -r requirements.txt
 streamlit run app.py
 ```
 
@@ -63,3 +63,17 @@ streamlit run app.py
 
 ## 화면 테마
 흰색 + 웜그레이 바탕에 살구색 포인트를 섞은 테마입니다. 색은 `app.py` 상단의 `THEME_CSS`(`:root` 색 변수)에서, 기본 밝은 테마는 `.streamlit/config.toml`에서 바꿀 수 있습니다. (config 파일이 없어도 `app.py`만으로 동작합니다.)
+
+## 배포 (Streamlit Community Cloud, 폰에서도 사용)
+1. [share.streamlit.io](https://share.streamlit.io) → **Create app** → 이 GitHub 저장소 / 브랜치 `main` / 메인 파일 `app.py`
+2. **Advanced settings → Secrets**에 아래를 입력 (코드나 저장소에는 키를 넣지 마세요)
+   ```toml
+   GEMINI_API_KEY = "내 Gemini API 키"
+   APP_PASSWORD = "접속 비밀번호"
+   ```
+3. 배포 후 주소를 폰 브라우저로 열고, 홈 화면에 추가하면 앱처럼 쓸 수 있습니다.
+
+주의
+- `APP_PASSWORD`를 설정하지 않으면 주소를 아는 누구나 내 API 키로 이미지를 만들 수 있습니다. 반드시 설정하세요.
+- 배포 서버는 재시작되면 `projects/`, `presets.json`이 사라질 수 있습니다. 생성 후 ZIP/CSV를 바로 내려받으세요.
+- 유튜브 업로더(`main.py`)용 패키지는 `requirements-youtube.txt`로 분리되어 있습니다.

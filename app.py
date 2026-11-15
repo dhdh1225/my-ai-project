@@ -5,6 +5,7 @@
 필요: pip install streamlit google-genai
 """
 import csv
+import hmac
 import io
 import json
 import math
@@ -569,14 +570,33 @@ hr { border-color: var(--line) !important; }
 st.markdown(THEME_CSS, unsafe_allow_html=True)
 
 
-def _default_api_key() -> str:
-    key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or ""
-    if not key:
+def _secret(name: str) -> str:
+    """환경변수 → Streamlit secrets 순으로 값을 찾는다."""
+    val = os.environ.get(name) or ""
+    if not val:
         try:
-            key = st.secrets.get("GEMINI_API_KEY", "")
-        except Exception:  # noqa: BLE001
-            key = ""
-    return key
+            val = str(st.secrets.get(name, "") or "")
+        except Exception:  # noqa: BLE001 - secrets 파일이 없을 때
+            val = ""
+    return val
+
+
+def _default_api_key() -> str:
+    return _secret("GEMINI_API_KEY") or _secret("GOOGLE_API_KEY")
+
+
+# 배포 시 접근 제한: APP_PASSWORD가 설정돼 있으면 비밀번호를 맞혀야 앱이 열린다.
+_app_pw = _secret("APP_PASSWORD")
+if _app_pw and not ss.get("_authed"):
+    st.title("🔒 로그인")
+    _pw = st.text_input("비밀번호", type="password")
+    if _pw:
+        if hmac.compare_digest(_pw.encode("utf-8"), _app_pw.encode("utf-8")):
+            ss._authed = True
+            st.rerun()
+        else:
+            st.error("비밀번호가 틀렸습니다.")
+    st.stop()
 
 
 DEFAULTS = {"script": "", "format_prompt": DEFAULT_FORMAT_PROMPT, "style": JIGU_STYLE,
