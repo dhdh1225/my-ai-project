@@ -5,6 +5,7 @@
 필요: pip install streamlit google-genai
 """
 import csv
+import hashlib
 import hmac
 import html
 import io
@@ -155,25 +156,28 @@ def analyze_script(client, model: str, script: str) -> dict:
 
 
 # ───────────────────────── 2단계: 초 단위 분할 ─────────────────────────
-def _units(text: str, max_len: int):
-    """문장 단위로 쪼개되, 너무 긴 문장은 쉼표/공백 기준으로 추가 분할."""
-    sents = [s.strip() for s in re.split(r"(?<=[.!?。…])\s+|\n+", text) if s.strip()]
-    out = []
-    for s in sents:
-        if len(s) <= max_len:
-            out.append(s)
+_SENT_SPLIT = re.compile(r'(?<=[.!?。…])\s+|(?<=[.!?。…]["\'”’)\]」』])\s+|\n+')
+_SENT_END = re.compile(r"[.!?。…]")
+
+
+def _units(text: str):
+    """문장 단위로만 나눈다. 마침표(. ! ? 。 …)로 끝나는 지점에서만 끊고, 문장 중간은 자르지 않는다."""
+    return [u.strip() for u in _SENT_SPLIT.split(text) if u and u.strip()]
+
+
+def _soft_units(text: str, max_len: int):
+    """문장 부호가 하나도 없는 아주 긴 덩어리만 예외적으로 쉼표/공백에서 나눈다."""
+    out, buf = [], ""
+    for tok in re.split(r"(?<=[,，、])\s*|\s+", text):
+        if not tok:
             continue
-        buf = ""
-        for tok in re.split(r"(?<=[,，、])\s*|\s+", s):
-            if not tok:
-                continue
-            if buf and len(buf) + len(tok) + 1 > max_len:
-                out.append(buf)
-                buf = tok
-            else:
-                buf = f"{buf} {tok}".strip()
-        if buf:
+        if buf and len(buf) + len(tok) + 1 > max_len:
             out.append(buf)
+            buf = tok
+        else:
+            buf = f"{buf} {tok}".strip()
+    if buf:
+        out.append(buf)
     return out
 
 
@@ -191,21 +195,32 @@ def estimate(script: str, sec_per_scene: int, cps: float):
 
 
 def split_script(script: str, sec_per_scene: int, chars_per_sec: float):
-    """글자 수/낭독 속도로 전체 길이를 추정해 장면당 sec_per_scene초가 되도록 분할."""
+    """대본을 '장면당 sec_per_scene초' 분량에 가깝게 나눈다.
+    장면은 항상 문장이 끝나는 곳(마침표 등)에서만 끊긴다. 문장이 길면 그 장면은 목표보다 조금 길어진다."""
     text = script.strip()
     total_chars, total_sec, n = estimate(text, sec_per_scene, chars_per_sec)
     if total_chars == 0:
         return [], 0.0
     target = total_chars / n  # 장면당 목표 글자 수 (공백 제외)
 
-    units = _units(text, max(10, int(target * 1.6)))
-    groups = [[] for _ in range(n)]
-    cum = 0
+    units = []
+    for u in _units(text):
+        # 문장 부호가 전혀 없는데 아주 긴 덩어리일 때만 예외적으로 더 쪼갠다
+        if not _SENT_END.search(u) and _nsp(u) > 2 * target:
+            units.extend(_soft_units(u, max(10, int(target * 1.6))))
+        else:
+            units.append(u)
+
+    groups, cur, cur_len = [], [], 0
     for u in units:
         ln = _nsp(u)
-        groups[min(n - 1, int((cum + ln / 2) / target))].append(u)
-        cum += ln
-    groups = [g for g in groups if g]
+        if cur and cur_len + ln / 2 > target:  # 이 문장을 더하면 목표를 더 많이 넘기면 여기서 끊는다
+            groups.append(cur)
+            cur, cur_len = [], 0
+        cur.append(u)
+        cur_len += ln
+    if cur:
+        groups.append(cur)
 
     scenes, t = [], 0.0
     for i, g in enumerate(groups, 1):
@@ -394,6 +409,14 @@ def list_projects():
 
 
 # ───────────────────────── 결과 보조 ─────────────────────────
+def current_psig() -> str:
+    """프롬프트를 만들 때 쓴 스타일·규칙·언어·모델의 서명. 바뀌면 그 장면 프롬프트는 낡은 것으로 본다."""
+    st_ = st.session_state
+    raw = json.dumps([st_.get("style"), st_.get("format_prompt"), st_.get("lang"), st_.get("text_model")],
+                     ensure_ascii=False)
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()[:12]
+
+
 def compose_gen_prompt(sc) -> str:
     """이미지 생성에 실제로 보내는 프롬프트 (글자 언어 규칙 + 레퍼런스 안내 포함)."""
     st_ = st.session_state
@@ -419,14 +442,45 @@ def _paint_image(img_slot, sc, busy: bool):
             st.markdown('<div class="ph">🖼️<br>아직 만들지 않음</div>', unsafe_allow_html=True)
 
 
+def _ensure_prompt(sc):
+    """이 장면의 프롬프트가 아직 없으면 지금 이 장면 것만 만든다 (대본 분석은 한 번만)."""
+    st_ = st.session_state
+    if sc.get("prompt"):
+        return
+    client = get_client(st_.api_key)
+    if not st_.analysis:
+        st_.analysis = analyze_script(client, st_.text_model, st_.script)
+        st_.analysis_hash = script_hash(st_.script)
+    descs = build_scene_descriptions(client, st_.text_model, st_.analysis or {}, [sc], st_.format_prompt, st_.lang)
+    desc = descs.get(sc["idx"]) or sc["text"]
+    sc["desc"], sc["prompt"], sc["psig"] = desc, compose_prompt(st_.style, desc), current_psig()
+    if st_.get("motion_auto"):
+        res = build_motion_prompts(client, st_.text_model, st_.analysis, [sc], st_.motion_rule)
+        base = res.get(sc["idx"]) or "Slow gentle zoom in, subtle ambient movement, keep the illustration style unchanged."
+        sc["motion"] = ensure_silent(base, st_.silent_rule)
+
+
 def _regen_inline(img_slot, sc):
-    """한 장면만 그 자리에서 바로 다시 생성한다."""
+    """한 장면만 그 자리에서 만든다. 프롬프트가 아직 없으면 먼저 만들고, 이어서 이미지를 만든다."""
     st_ = st.session_state
     if not st_.get("api_key"):
         st.error("사이드바에 Gemini API 키를 입력하세요.")
         return
+    had_image = bool(sc.get("image"))
+    if not sc.get("prompt"):
+        with img_slot.container():
+            st.markdown('<div class="ph busy">✍️<br>프롬프트 작성 중…<br><small>WRITING PROMPT</small></div>',
+                        unsafe_allow_html=True)
+        try:
+            _ensure_prompt(sc)
+        except Exception as e:  # noqa: BLE001
+            sc["error"] = f"프롬프트 작성 실패: {e}"[:300]
+            st.toast(f"#{sc['idx']} {sc['error'][:80]}")
+            _paint_image(img_slot, sc, False)
+            return
     with img_slot.container():
-        st.markdown('<div class="ph busy">🔄<br>다시 생성 중…<br><small>GENERATING AI VISION</small></div>',
+        msg = "다시 생성 중…" if had_image else "이미지 생성 중…"
+        st.markdown(f'<div class="ph busy">🔄<br>{msg}<br><small>GENERATING AI VISION</small></div>',
                     unsafe_allow_html=True)
     sc["gen_prompt"] = compose_gen_prompt(sc)
     img, err = generate_one(get_client(st_.api_key), st_[f"mid_{st_.model_label}"], sc["gen_prompt"],
@@ -438,7 +492,7 @@ def _regen_inline(img_slot, sc):
             save_image(sc)
         st.rerun()  # 다운로드 버튼 등이 새 이미지를 가리키도록 화면을 새로 그린다
     sc["error"] = err
-    st.toast(f"#{sc['idx']} 재생성 실패: {(err or '')[:80]}")
+    st.toast(f"#{sc['idx']} 생성 실패: {(err or '')[:80]}")
     _paint_image(img_slot, sc, False)
 
 
@@ -480,8 +534,9 @@ def render_scene_row(slot, sc, interactive: bool = False, busy: bool = False):
                 f'<span class="chip {kind}">{label}</span></div>'
                 f'<div class="lbl">NARRATION SCRIPT</div><div class="scene-script">{script_html}</div>{prompt_html}{motion_html}',
                 unsafe_allow_html=True)
-            if interactive and st.button(":material/refresh: 이 장면 다시 만들기", key=f"regen_{sc['idx']}", width="stretch",
-                                         disabled=not sc.get("prompt")):
+            btn = (":material/refresh: 이 장면 다시 만들기" if sc.get("image")
+                   else ":material/auto_awesome: 이 장면 생성")
+            if interactive and st.button(btn, key=f"regen_{sc['idx']}", width="stretch"):
                 _regen_inline(img_slot, sc)
 
 
@@ -956,6 +1011,7 @@ def rewrite_prompts(only_ids=None):
         desc = descs.get(s["idx"]) or s["text"]  # 누락 시 대본 원문으로 대체
         s["desc"] = desc
         s["prompt"] = compose_prompt(style, desc)
+        s["psig"] = current_psig()
         for k in ("image", "error", "gen_prompt", "motion"):
             s.pop(k, None)
     bar.empty()
@@ -1021,7 +1077,7 @@ def do_images(only=None, force=False):
         st.warning(f"속도 제한(429)이 감지되어 동시 생성 수를 {workers}→{throttle.limit}개로 자동 낮췄습니다. "
                    "계속 실패하면 사이드바에서 동시 생성 수를 낮춰 보세요.")
     elif any("429" in (t.get("error") or "") or "RESOURCE_EXHAUSTED" in (t.get("error") or "") for t in fails):
-        st.warning("속도 제한(429)으로 실패했습니다. 동시 생성 수를 낮추고 '실패 장면 전부 재생성'을 눌러 보세요.")
+        st.warning("속도 제한(429)으로 실패했습니다. 동시 생성 수를 낮추고 '일괄 생성'을 다시 눌러 보세요.")
     st.toast("이미지 생성 완료" if not fails else f"이미지 생성 완료 (실패 {len(fails)}장)")
     autosave()
 
@@ -1031,14 +1087,11 @@ def do_batch():
     if not ss.scenes or ss.get("split_sig") != (script_hash(script), sec_per_scene, cps):
         do_split()  # 아직 안 나눴거나, 대본·분할 설정이 바뀌었으면 먼저 나눈다
     do_analyze(force=False)
-    psig = (style, format_prompt, image_lang, text_model)
-    if ss.get("prompt_sig") != psig:
-        rewrite_prompts(None)  # 스타일·규칙이 바뀌었으면 전체 프롬프트를 새로 만든다
-    else:
-        missing = {sc["idx"] for sc in ss.scenes if not sc.get("prompt")}
-        if missing:
-            rewrite_prompts(missing)
-    ss.prompt_sig = psig
+    psig = current_psig()
+    # 프롬프트가 없거나, 지금 스타일·규칙과 다르게 만들어진 장면만 새로 만든다. (개별 생성한 장면은 그대로 둔다)
+    stale = {sc["idx"] for sc in ss.scenes if not sc.get("prompt") or sc.get("psig") not in (None, psig)}
+    if stale:
+        rewrite_prompts(stale)
     if ss.motion_auto:
         need = {sc["idx"] for sc in ss.scenes if not sc.get("motion")}
         if need:
