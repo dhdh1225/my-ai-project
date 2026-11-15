@@ -553,6 +553,8 @@ def _paint_image(img_slot, sc, busy: bool):
         elif sc.get("error"):
             st.markdown('<div class="ph fail">⚠️<br>생성 실패</div>', unsafe_allow_html=True)
             st.caption(sc["error"][:140])
+        elif sc.get("skip"):
+            st.markdown('<div class="ph">✋<br>제외됨<br><small>MY OWN IMAGE / VIDEO</small></div>', unsafe_allow_html=True)
         elif busy:
             st.markdown('<div class="ph busy">🔄<br>이미지 생성 중…<br><small>GENERATING AI VISION</small></div>',
                         unsafe_allow_html=True)
@@ -643,11 +645,44 @@ def _edit_scene(idx, parts):
     t, new = sc["start"], []
     for p in parts:
         dur = (sc["end"] - sc["start"]) * len(p) / total
-        new.append({"idx": 0, "start": t, "end": t + dur, "text": p})
+        new.append({"idx": 0, "start": t, "end": t + dur, "text": p, **({"skip": True} if sc.get("skip") else {})})
         t += dur
     ss_.scenes[pos:pos + 1] = new  # 나뉜 장면은 새 문장이라 이미지·프롬프트 없이 시작
     _renumber(ss_.scenes)
     autosave(full=True)  # 번호가 바뀌었으니 저장된 이미지 파일도 다시 정리
+
+
+def _ask_delete(idx):
+    ss_ = st.session_state
+    ss_.del_idx, ss_.edit_idx = idx, None
+
+
+def _cancel_delete():
+    st.session_state.del_idx = None
+
+
+def _set_skip(idx, value: bool):
+    """제외(대본은 남기고 이미지 생성만 건너뜀) / 되돌리기."""
+    ss_ = st.session_state
+    pos = _find_scene(idx)
+    if pos is not None:
+        if value:
+            ss_.scenes[pos]["skip"] = True
+            ss_.scenes[pos].pop("error", None)
+        else:
+            ss_.scenes[pos].pop("skip", None)
+    ss_.del_idx = None
+
+
+def _delete_scene(idx):
+    """장면을 완전히 없애고 번호를 다시 매긴다."""
+    ss_ = st.session_state
+    pos = _find_scene(idx)
+    if pos is not None:
+        del ss_.scenes[pos]
+        _renumber(ss_.scenes)
+        autosave(full=True)  # 번호가 바뀌었으니 저장된 이미지 파일도 다시 정리
+    ss_.del_idx = ss_.edit_idx = None
 
 
 def _start_edit(idx):
@@ -680,7 +715,8 @@ def _merge_next(idx):
         return
     a, b = ss_.scenes[pos], ss_.scenes[pos + 1]
     ss_.scenes[pos:pos + 2] = [{"idx": 0, "start": a["start"], "end": b["end"],
-                                "text": f'{a["text"]} {b["text"]}'.strip()}]
+                                "text": f'{a["text"]} {b["text"]}'.strip(),
+                                **({"skip": True} if a.get("skip") and b.get("skip") else {})}]
     _renumber(ss_.scenes)
     ss_.edit_idx = None
     autosave(full=True)
@@ -693,7 +729,9 @@ def render_scene_row(slot, sc, interactive: bool = False, busy: bool = False):
     """장면 카드: 왼쪽 이미지(+다운로드) | 오른쪽 SCENE·상태·NARRATION SCRIPT·IMAGE PROMPT·다시 만들기."""
     st_ = st.session_state
     portrait = st_.get("aspect") in ("9:16", "3:4")
-    if sc.get("image") and not sc.get("prompt"):
+    if sc.get("skip"):
+        kind, label = "wait", "제외됨 · 내 이미지/영상"
+    elif sc.get("image") and not sc.get("prompt"):
         kind, label = "prog", "수정됨 · 다시 생성 필요"
     elif sc.get("image"):
         kind, label = "done", "완성됨"
@@ -722,29 +760,49 @@ def render_scene_row(slot, sc, interactive: bool = False, busy: bool = False):
         with right:
             head = (f'<div class="scene-head"><span><span class="scene-badge">SCENE {sc["idx"]}</span>'
                     f'</span><span class="chip {kind}">{label}</span></div>')
-            if interactive and st_.get("edit_idx") == sc["idx"]:
+            idx = sc["idx"]
+            if interactive and st_.get("del_idx") == idx:
+                st.markdown(head + '<div class="lbl">이 장면을 어떻게 할까요?</div>'
+                            f'<div class="scene-script">{script_html}</div>', unsafe_allow_html=True)
+                st.caption("제외: 대본은 남기고 이미지 생성만 건너뜁니다. 내 이미지·영상을 넣을 자리로 쓰세요. (되돌릴 수 있음)  \n"
+                           "완전 삭제: 카드를 없애고 번호를 다시 매깁니다.")
+                d1, d2, d3 = st.columns(3)
+                d1.button(":material/block: 제외", key=f"skip_{idx}", on_click=_set_skip,
+                          args=(idx, True), type="primary", width="stretch")
+                d2.button(":material/delete: 완전 삭제", key=f"del_{idx}", on_click=_delete_scene,
+                          args=(idx,), width="stretch")
+                d3.button(":material/close: 취소", key=f"delno_{idx}", on_click=_cancel_delete, width="stretch")
+            elif interactive and st_.get("edit_idx") == idx:
                 st.markdown(head + '<div class="lbl">NARRATION SCRIPT · 수정</div>', unsafe_allow_html=True)
-                st.text_area("문장 수정", key=f"edit_txt_{sc['idx']}", height=130, label_visibility="collapsed")
+                st.text_area("문장 수정", key=f"edit_txt_{idx}", height=130, label_visibility="collapsed")
                 st.caption("나누고 싶은 곳에서 Enter(줄바꿈)를 누르고 저장하면 그 위치에서 장면이 나뉩니다.")
                 c1, c2 = st.columns(2)
-                c1.button(":material/check: 저장", key=f"save_{sc['idx']}", on_click=_save_edit,
-                          args=(sc["idx"],), type="primary", width="stretch")
-                c2.button(":material/close: 취소", key=f"cancel_{sc['idx']}", on_click=_cancel_edit, width="stretch")
+                c1.button(":material/check: 저장", key=f"save_{idx}", on_click=_save_edit,
+                          args=(idx,), type="primary", width="stretch")
+                c2.button(":material/close: 취소", key=f"cancel_{idx}", on_click=_cancel_edit, width="stretch")
             else:
+                boxes = "" if sc.get("skip") else f"{prompt_html}{motion_html}"
                 st.markdown(
                     head + f'<div class="lbl">NARRATION SCRIPT</div><div class="scene-script">{script_html}</div>'
-                    f'{prompt_html}{motion_html}', unsafe_allow_html=True)
+                    f'{boxes}', unsafe_allow_html=True)
                 if interactive:
                     e1, e2 = st.columns(2)
-                    e1.button(":material/edit: 수정 · 나누기", key=f"edit_{sc['idx']}", on_click=_start_edit,
-                              args=(sc["idx"],), width="stretch")
-                    if sc["idx"] < len(st_.scenes):
-                        e2.button(":material/merge: 아래와 합치기", key=f"merge_{sc['idx']}", on_click=_merge_next,
-                                  args=(sc["idx"],), width="stretch")
-                    btn = (":material/refresh: 이 장면 다시 만들기" if sc.get("image")
-                           else ":material/auto_awesome: 이 장면 생성")
-                    if st.button(btn, key=f"regen_{sc['idx']}", width="stretch"):
-                        _regen_inline(img_slot, sc)
+                    e1.button(":material/edit: 수정 · 나누기", key=f"edit_{idx}", on_click=_start_edit,
+                              args=(idx,), width="stretch")
+                    if idx < len(st_.scenes):
+                        e2.button(":material/merge: 아래와 합치기", key=f"merge_{idx}", on_click=_merge_next,
+                                  args=(idx,), width="stretch")
+                    g1, g2 = st.columns([5, 2])
+                    if sc.get("skip"):
+                        g1.button(":material/undo: 되돌리기 (이미지 생성 대상으로)", key=f"unskip_{idx}",
+                                  on_click=_set_skip, args=(idx, False), width="stretch")
+                    else:
+                        btn = (":material/refresh: 이 장면 다시 만들기" if sc.get("image")
+                               else ":material/auto_awesome: 이 장면 생성")
+                        if g1.button(btn, key=f"regen_{idx}", width="stretch"):
+                            _regen_inline(img_slot, sc)
+                    g2.button(":material/delete: 삭제", key=f"ask_{idx}", on_click=_ask_delete, args=(idx,),
+                              width="stretch")
 
 
 def render_rows(container, scenes, interactive: bool = False):
@@ -762,7 +820,7 @@ def make_zip(scenes, rule: str = "", with_motion: bool = False, silent: str = ""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for s in scenes:
-            if s.get("image"):
+            if s.get("image") and not s.get("skip"):
                 base = scene_filename(s, rule)
                 z.writestr(f'{base}.{img_ext(s["image"])}', s["image"])
                 if with_motion and s.get("motion"):
@@ -775,14 +833,14 @@ def make_csv(scenes, silent: str = "") -> bytes:
     w = csv.writer(buf)
     w.writerow(["번호", "대본", "이미지 프롬프트", "애니메이션 프롬프트", "상태"])
     for s in scenes:
-        status = "성공" if s.get("image") else ("실패: " + s["error"] if s.get("error") else "미생성")
+        status = "제외(직접 사용)" if s.get("skip") else "성공" if s.get("image") else ("실패: " + s["error"] if s.get("error") else "미생성")
         w.writerow([s["idx"], s["text"], s.get("gen_prompt") or s.get("prompt", ""),
                     ensure_silent(s.get("motion", ""), silent), status])
     return ("\ufeff" + buf.getvalue()).encode("utf-8")
 
 
 def make_motion_txt(scenes, silent: str = "") -> bytes:
-    out = [f'#{s["idx"]}\n{ensure_silent(s.get("motion", ""), silent)}\n' for s in scenes]
+    out = [f'#{s["idx"]}\n{ensure_silent(s.get("motion", ""), silent)}\n' for s in scenes if not s.get("skip")]
     return "\n".join(out).encode("utf-8")
 
 
@@ -916,7 +974,7 @@ DEFAULTS = {"script": "", "format_prompt": DEFAULT_FORMAT_PROMPT, "style": JIGU_
             "aspect": "16:9", "sec": 5, "cps": 7.0, "lang": "언어 없음", "workers": 4,
             "api_key": _default_api_key(), "project_name": "my_project", "autosave": True,
             "motion_rule": DEFAULT_MOTION_RULE, "name_rule": list(NAME_RULES)[0], "zip_motion": False, "silent_rule": SILENT_DIRECTIVE, "motion_auto": True, "new_preset_name": "", "load_choice": "(선택)",
-            "log": [], "edit_idx": None, "analysis": None, "analysis_hash": None, "scenes": [], "total_sec": 0.0, "refs": [],
+            "log": [], "edit_idx": None, "del_idx": None, "analysis": None, "analysis_hash": None, "scenes": [], "total_sec": 0.0, "refs": [],
             **{f"mid_{k}": v for k, v in IMAGE_MODELS.items()}}
 for _k, _v in DEFAULTS.items():
     ss.setdefault(_k, _v)
@@ -1265,7 +1323,7 @@ def do_motion(only_ids=None):
 
 
 def do_images(only=None, force=False):
-    targets = [s for s in ss.scenes if s.get("prompt")
+    targets = [s for s in ss.scenes if s.get("prompt") and not s.get("skip")
                and (s["idx"] in only if only is not None else (force or not s.get("image")))]
     if not targets:
         st.info("모든 장면의 이미지가 이미 만들어져 있습니다.")
@@ -1322,11 +1380,12 @@ def do_batch():
     do_analyze(force=False)
     psig = current_psig()
     # 프롬프트가 없거나, 지금 스타일·규칙과 다르게 만들어진 장면만 새로 만든다. (개별 생성한 장면은 그대로 둔다)
-    stale = {sc["idx"] for sc in ss.scenes if not sc.get("prompt") or sc.get("psig") not in (None, psig)}
+    stale = {sc["idx"] for sc in ss.scenes
+             if not sc.get("skip") and (not sc.get("prompt") or sc.get("psig") not in (None, psig))}
     if stale:
         rewrite_prompts(stale)
     if ss.motion_auto:
-        need = {sc["idx"] for sc in ss.scenes if not sc.get("motion")}
+        need = {sc["idx"] for sc in ss.scenes if not sc.get("motion") and not sc.get("skip")}
         if need:
             do_motion(need)
     do_images()
@@ -1345,8 +1404,9 @@ except Exception as e:  # noqa: BLE001
 
 # ───────────────────────── 결과 표시 ─────────────────────────
 if ss.scenes:
-    n_img = sum(1 for s in ss.scenes if s.get("image"))
-    st.subheader(f"장면 {len(ss.scenes)}개 · 이미지 {n_img}장 완료")
+    n_img = sum(1 for s in ss.scenes if s.get("image") and not s.get("skip"))
+    n_skip = sum(1 for s in ss.scenes if s.get("skip"))
+    st.subheader(f"장면 {len(ss.scenes)}개 · 이미지 {n_img}장 완료" + (f" · 제외 {n_skip}개" if n_skip else ""))
     if n_img:  # 내려받을 이미지가 생긴 뒤에만 내보내기 버튼을 보여 준다
         e1, e2, e3 = st.columns(3)
         e1.download_button(":material/download: 이미지 ZIP",
@@ -1354,7 +1414,7 @@ if ss.scenes:
                            "images.zip", "application/zip", width="stretch")
         e2.download_button(":material/download: 장면/프롬프트 CSV", make_csv(ss.scenes, ss.silent_rule),
                            "scenes.csv", "text/csv", width="stretch")
-        if any(s.get("motion") for s in ss.scenes):
+        if any(s.get("motion") and not s.get("skip") for s in ss.scenes):
             e3.download_button(":material/download: 애니메이션 프롬프트 TXT",
                                make_motion_txt(ss.scenes, ss.silent_rule), "motion_prompts.txt", "text/plain",
                                width="stretch")
