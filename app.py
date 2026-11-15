@@ -25,7 +25,9 @@ IMAGE_MODELS = {
     "나노바나나 프로": "gemini-3-pro-image-preview",
     "나노바나나2": "gemini-3.1-flash-image-preview",
 }
-DEFAULT_TEXT_MODEL = "gemini-2.5-flash"
+DEFAULT_TEXT_MODEL = "gemini-3.8-flash"
+# 서비스 종료된 텍스트 모델 → 저장된 프로젝트를 불러올 때 기본 모델로 교체
+RETIRED_TEXT_MODELS = {"gemini-2.5-flash"}
 ASPECT_RATIOS = ["16:9", "9:16", "1:1", "4:3", "3:4"]
 SCENE_SECONDS = [3, 4, 5, 6, 10, 15, 20]
 IMAGE_LANGS = {"한국어": "Korean (Hangul)", "일본어": "Japanese", "영어": "English", "언어 없음": None}
@@ -679,6 +681,8 @@ def load_project():
             continue
         if k == "model_label" and v not in IMAGE_MODELS:
             continue
+        if k == "text_model" and str(v).strip() in RETIRED_TEXT_MODELS:
+            v = DEFAULT_TEXT_MODEL
         if k == "preset" and v not in options:
             v = CUSTOM_LABEL
         ss[k] = v
