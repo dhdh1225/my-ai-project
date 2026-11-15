@@ -450,30 +450,83 @@ def list_projects():
 
 
 # ───────────────────────── 결과 보조 ─────────────────────────
-def render_scene_row(slot, sc):
-    """한 장면을 한 줄로 그린다: 이미지 | 대본. 가로형은 이미지를 넓게, 세로형은 대본을 넓게."""
+def compose_gen_prompt(sc) -> str:
+    """이미지 생성에 실제로 보내는 프롬프트 (글자 언어 규칙 + 레퍼런스 안내 포함)."""
+    st_ = st.session_state
+    hint = (" Match the character design, outfit and key objects of the attached reference image(s) exactly."
+            if st_.get("refs") else "")
+    return f'{sc["prompt"].strip()} {lang_directive(st_.get("lang", "언어 없음"))}{hint}'
+
+
+def _paint_image(img_slot, sc, busy: bool):
+    with img_slot.container():
+        if sc.get("image"):
+            try:
+                st.image(sc["image"], width="stretch")
+            except Exception:  # noqa: BLE001 - 깨진 이미지 하나로 화면이 죽지 않게
+                st.markdown('<div class="ph fail">⚠️<br>이미지를 표시할 수 없음</div>', unsafe_allow_html=True)
+        elif sc.get("error"):
+            st.markdown('<div class="ph fail">⚠️<br>생성 실패</div>', unsafe_allow_html=True)
+            st.caption(sc["error"][:140])
+        else:
+            msg = "🔄<br>생성 중…" if busy else "🖼️<br>아직 만들지 않음"
+            st.markdown(f'<div class="ph">{msg}</div>', unsafe_allow_html=True)
+
+
+def _regen_inline(img_slot, sc):
+    """한 장면만 그 자리에서 바로 다시 생성한다."""
+    st_ = st.session_state
+    if not st_.get("api_key"):
+        st.error("사이드바에 Gemini API 키를 입력하세요.")
+        return
+    with img_slot.container():
+        st.markdown('<div class="ph">🔄<br>다시 생성 중…</div>', unsafe_allow_html=True)
+    sc["gen_prompt"] = compose_gen_prompt(sc)
+    img, err = generate_one(get_client(st_.api_key), st_[f"mid_{st_.model_label}"], sc["gen_prompt"],
+                            st_.aspect, st_.refs, Throttle(1))
+    if img:
+        sc["image"] = img
+        sc.pop("error", None)
+        if st_.get("autosave"):
+            save_image(sc)
+    else:
+        sc["error"] = err
+        st.toast(f"#{sc['idx']} 재생성 실패: {(err or '')[:80]}")
+    _paint_image(img_slot, sc, False)
+
+
+def render_scene_row(slot, sc, interactive: bool = False, busy: bool = False):
+    """장면 카드: 왼쪽 이미지 | 오른쪽 SCENE 번호·상태·SCRIPT(대본)·다시 생성 버튼."""
     portrait = st.session_state.get("aspect") in ("9:16", "3:4")
-    with slot.container():
-        left, right = st.columns([2, 3] if portrait else [3, 2], vertical_alignment="center")
+    if sc.get("image"):
+        kind, label = "done", "완료"
+    elif sc.get("error"):
+        kind, label = "fail", "실패"
+    elif busy:
+        kind, label = "prog", "생성 중"
+    else:
+        kind, label = "wait", "미생성"
+    with slot.container(border=True):
+        left, right = st.columns([2, 3] if portrait else [5, 4], vertical_alignment="center")
         with left:
-            if sc.get("image"):
-                try:
-                    st.image(sc["image"], width="stretch")
-                except Exception:  # noqa: BLE001 - 깨진 이미지 하나로 화면이 죽지 않게
-                    st.error("이미지를 표시할 수 없음")
-            elif sc.get("error"):
-                st.error(f"생성 실패: {sc['error'][:120]}")
-            else:
-                st.info("⏳ 생성 대기/진행 중…")
+            img_slot = st.empty()
+            _paint_image(img_slot, sc, busy)
         with right:
-            st.markdown(f'**#{sc["idx"]}** · {fmt_time(sc["start"])}~{fmt_time(sc["end"])}')
+            st.markdown(
+                f'<div class="scene-head"><span><span class="scene-badge">SCENE {sc["idx"]}</span>'
+                f'<span class="scene-time">{fmt_time(sc["start"])}~{fmt_time(sc["end"])}</span></span>'
+                f'<span class="chip {kind}">{label}</span></div><div class="lbl">SCRIPT</div>',
+                unsafe_allow_html=True)
             st.write(sc["text"])
+            if interactive and st.button("🔄 다시 생성", key=f"regen_{sc['idx']}", width="stretch",
+                                         disabled=not sc.get("prompt")):
+                _regen_inline(img_slot, sc)
 
 
-def render_rows(container, scenes):
-    """장면 1..N을 위에서 아래로 한 줄씩 그린다."""
+def render_rows(container, scenes, interactive: bool = False):
+    """장면 1..N을 위에서 아래로 카드 한 줄씩 그린다."""
     for sc in scenes:
-        render_scene_row(container.empty(), sc)
+        render_scene_row(container.empty(), sc, interactive)
 
 
 def scene_filename(sc, rule: str) -> str:
@@ -573,6 +626,23 @@ textarea, input { background: #fff !important; color: var(--text) !important; }
 [data-testid="stSlider"] [role="slider"] { background-color: var(--accent) !important; }
 [data-testid="stImage"] img { border-radius: 10px; box-shadow: 0 2px 10px rgba(61, 51, 48, .10); }
 hr { border-color: var(--line) !important; }
+
+/* 장면 카드 */
+[data-testid="stVerticalBlockBorderWrapper"] { border-color: var(--line) !important; border-radius: 14px !important; background: #fff; }
+.scene-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: .55rem; }
+.scene-badge { background: #3d3330; color: #fff; font-weight: 700; letter-spacing: .06em; font-size: .72rem;
+    padding: .28rem .6rem; border-radius: 6px; }
+.scene-time { color: var(--muted); font-size: .8rem; margin-left: .6rem; }
+.chip { font-size: .75rem; padding: .2rem .7rem; border-radius: 999px; font-weight: 600; }
+.chip.done { background: #e6f0e8; color: #3f6b4b; }
+.chip.prog { background: var(--soft); color: var(--accent-deep); }
+.chip.fail { background: #fbe4e0; color: #a33a2f; }
+.chip.wait { background: #efeae6; color: var(--muted); }
+.lbl { font-size: .7rem; letter-spacing: .12em; color: var(--muted); font-weight: 700; margin: .1rem 0 .2rem; }
+.ph { min-height: 170px; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: var(--side); border: 1px dashed #d6cec7; border-radius: 10px; color: var(--muted);
+    font-size: .95rem; text-align: center; line-height: 1.8; }
+.ph.fail { background: #fff4f2; border-color: #f0c4bd; color: #a33a2f; }
 </style>
 """
 st.markdown(THEME_CSS, unsafe_allow_html=True)
@@ -612,7 +682,7 @@ DEFAULTS = {"script": "", "format_prompt": DEFAULT_FORMAT_PROMPT, "style": JIGU_
             "aspect": "16:9", "sec": 5, "cps": 7.0, "lang": "언어 없음", "workers": 4,
             "api_key": _default_api_key(), "project_name": "my_project", "autosave": True,
             "force_all": False, "motion_rule": DEFAULT_MOTION_RULE, "name_rule": list(NAME_RULES)[0], "zip_motion": False, "silent_rule": SILENT_DIRECTIVE, "motion_auto": True, "test_no": 1, "edit_k": 1, "new_preset_name": "", "load_choice": "(선택)",
-            "analysis": None, "analysis_hash": None, "scenes": [], "total_sec": 0.0, "refs": [], "editor_ver": 0,
+            "log": [], "analysis": None, "analysis_hash": None, "scenes": [], "total_sec": 0.0, "refs": [], "editor_ver": 0,
             **{f"mid_{k}": v for k, v in IMAGE_MODELS.items()}}
 for _k, _v in DEFAULTS.items():
     ss.setdefault(_k, _v)
@@ -855,6 +925,26 @@ with st.expander("🧪 단계별 실행 · 테스트 · 재생성"):
     t4.checkbox("완료된 이미지도 모두 다시 생성", key="force_all")
 
 
+_any_run = any([run_all, run1, run2, run3, run4, run6, run_test, run_fail])
+if _any_run:
+    ss.log = []
+if _any_run or ss.get("log"):
+    _log_box = st.expander("📜 진행 로그", expanded=_any_run).empty()
+else:
+    _log_box = None
+
+
+def log(msg: str):
+    """진행 상황을 번호 붙여 기록하고 로그 상자를 갱신한다."""
+    ss.log = [*ss.get("log", []), msg]
+    if _log_box is not None:
+        _log_box.code("\n".join(f"{i:02d}  {m}" for i, m in enumerate(ss.log[-40:], 1)), language=None)
+
+
+if _log_box is not None and ss.get("log") and not _any_run:
+    _log_box.code("\n".join(f"{i:02d}  {m}" for i, m in enumerate(ss.log[-40:], 1)), language=None)
+
+
 def need_key() -> bool:
     if not api_key:
         st.error("사이드바에 Gemini API 키를 입력하세요.")
@@ -878,6 +968,7 @@ def do_analyze(force=True):
     h = script_hash(script)
     if not force and ss.analysis and ss.analysis_hash == h:
         return  # 같은 대본이면 분석 결과 재사용
+    log(f"대본 분석 중 ({text_model})…")
     with st.spinner("1/4 대본 분석 중…"):
         ss.analysis = analyze_script(get_client(api_key), text_model, script)
     ss.analysis_hash = h
@@ -885,8 +976,10 @@ def do_analyze(force=True):
 
 
 def do_split():
+    log(f"본문을 분할하는 중… ({_nsp(script):,}자, 장면당 {sec_per_scene}초 목표)")
     scenes, total = split_script(script, sec_per_scene, cps)
     ss.scenes, ss.total_sec = scenes, total
+    log(f"총 {len(scenes)}개 장면으로 분할 완료 (추정 길이 {fmt_time(total)})")
     bump()
     autosave(full=True)
 
@@ -896,6 +989,7 @@ def rewrite_prompts(only_ids=None):
     targets = [s for s in ss.scenes if only_ids is None or s["idx"] in only_ids]
     if not targets:
         return
+    log(f"장면별 프롬프트 작성 중 ({text_model}) · {len(targets)}장면")
     bar = st.progress(0.0, text="이미지 프롬프트 생성 중…")
     descs = build_scene_descriptions(
         get_client(api_key), text_model, ss.analysis or {}, targets, format_prompt, image_lang,
@@ -926,6 +1020,7 @@ def do_motion(only_ids=None):
         return
     if not ss.analysis:
         do_analyze(force=False) if script.strip() else None
+    log(f"움직임 프롬프트 작성 중 ({text_model}) · {len(targets)}장면")
     bar = st.progress(0.0, text="애니메이션 프롬프트 생성 중…")
     res = build_motion_prompts(get_client(api_key), text_model, ss.analysis, targets, motion_rule,
                                progress_cb=lambda d, t: bar.progress(d / t, text=f"애니메이션 프롬프트 {d}/{t}"))
@@ -944,12 +1039,11 @@ def do_images(only=None, force=False):
         st.info("생성할 장면이 없습니다. (이미 모두 생성됐거나 프롬프트가 없습니다. 3단계를 먼저 실행하세요.)")
         return
     by_idx = {s["idx"]: s for s in ss.scenes}
-    directive = lang_directive(image_lang)
-    ref_hint = (" Match the character design, outfit and key objects of the attached reference image(s) exactly."
-                if ss.refs else "")
     for t in targets:
         t.pop("error", None)
-        t["gen_prompt"] = f'{t["prompt"].strip()} {directive}{ref_hint}'
+        t["gen_prompt"] = compose_gen_prompt(t)
+    log(f"이미지 생성 중 ({model_id}) · 대상 {len(targets)}장")
+    log(f"병렬 처리 Worker: {workers}개")
     throttle = Throttle(workers)
     bar = st.progress(0.0, text=f"4/4 이미지 생성 0/{len(targets)} (동시 {workers}개)")
     holder = st.empty()
@@ -957,7 +1051,7 @@ def do_images(only=None, force=False):
     with holder.container():  # 장면 1..N 줄을 미리 만들어 두고, 끝나는 줄부터 채운다
         for sc in ss.scenes:
             slots[sc["idx"]] = st.empty()
-            render_scene_row(slots[sc["idx"]], sc)
+            render_scene_row(slots[sc["idx"]], sc, busy=True)
     done = [0]
 
     def on_done(idx, img, err):
@@ -968,11 +1062,12 @@ def do_images(only=None, force=False):
             save_image(by_idx[idx])
         bar.progress(done[0] / len(targets),
                      text=f"4/4 이미지 생성 {done[0]}/{len(targets)} (현재 동시 {throttle.limit}개)")
-        render_scene_row(slots[idx], by_idx[idx])  # 이 장면의 줄만 갱신
+        render_scene_row(slots[idx], by_idx[idx], busy=True)  # 이 장면의 카드만 갱신
     run_parallel(get_client(api_key), model_id, aspect, targets, workers, on_done, ss.refs, throttle)
     bar.empty()
     holder.empty()
     fails = [t for t in targets if not by_idx[t["idx"]].get("image")]
+    log(f"이미지 생성 완료: 성공 {len(targets) - len(fails)} / 실패 {len(fails)}")
     (st.warning if fails else st.success)(f"완료: 성공 {len(targets) - len(fails)} / 실패 {len(fails)}")
     if throttle.cuts:
         st.warning(f"속도 제한(429)이 감지되어 동시 생성 수를 {workers}→{throttle.limit}개로 자동 낮췄습니다. "
@@ -1080,7 +1175,7 @@ if ss.scenes:
 
     with tab_images:
         if any(s.get("image") or s.get("error") for s in ss.scenes):
-            render_rows(st.container(), ss.scenes)
+            render_rows(st.container(), ss.scenes, interactive=True)
             bad = [s["idx"] for s in ss.scenes if not s.get("image") and s.get("prompt")]
             pick = st.multiselect("다시 생성할 장면 번호", [s["idx"] for s in ss.scenes], default=bad)
             if st.button("♻️ 선택 장면 재생성") and need_key():
