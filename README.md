@@ -62,4 +62,4 @@ streamlit run app.py
 - 결과 ZIP / CSV / **SRT(타임코드 자막)** / 애니메이션 프롬프트 TXT 다운로드
 
 ## 화면 테마
-흰색 바탕에 차분한 살구색 포인트 테마입니다. 색은 `app.py` 상단의 `THEME_CSS`(`:root` 색 변수)에서, 기본 밝은 테마는 `.streamlit/config.toml`에서 바꿀 수 있습니다. (config 파일이 없어도 `app.py`만으로 동작합니다.)
+흰색 + 웜그레이 바탕에 살구색 포인트를 섞은 테마입니다. 색은 `app.py` 상단의 `THEME_CSS`(`:root` 색 변수)에서, 기본 밝은 테마는 `.streamlit/config.toml`에서 바꿀 수 있습니다. (config 파일이 없어도 `app.py`만으로 동작합니다.)

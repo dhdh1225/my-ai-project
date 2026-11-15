@@ -519,14 +519,14 @@ THEME_CSS = """
 @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css');
 :root {
   --bg: #ffffff;            /* 본문 배경 */
-  --side: #fcf1ee;          /* 사이드바 배경 (아주 연한 살구) */
-  --soft: #f9dcd7;          /* 포인트 살구 (참고색) */
-  --accent: #d9958a;        /* 강조 (더스티 살구) */
-  --accent-deep: #b8695d;   /* 강조 진한 톤 */
+  --side: #f6f3f0;          /* 사이드바 배경 (따뜻한 오프화이트) */
+  --soft: #f9dcd7;          /* 포인트 살구 (제목 밑줄 등) */
+  --accent: #d9958a;        /* 강조 (더스티 살구: 진행바·포커스·슬라이더) */
+  --accent-deep: #6b615b;   /* 마우스 올렸을 때 글씨 (웜그레이) */
   --cta: #efb9ad;           /* 주요 버튼 */
   --text: #3d3330;          /* 글씨 (따뜻한 차콜) */
   --muted: #8a7a76;         /* 보조 글씨 */
-  --line: #eadcd8;          /* 테두리 */
+  --line: #e6e0db;          /* 테두리 (웜그레이) */
 }
 html, body, .stApp, .stApp *:not([data-testid="stIconMaterial"]):not([class*="material" i]):not([class*="icon" i]) {
   font-family: 'Pretendard', -apple-system, 'Segoe UI', 'Noto Sans KR', sans-serif; }
@@ -555,7 +555,7 @@ textarea, input { background: #fff !important; color: var(--text) !important; }
 [data-baseweb="textarea"]:focus-within, [data-baseweb="input"]:focus-within {
     border-color: var(--accent) !important; box-shadow: 0 0 0 3px rgba(217, 149, 138, .18) !important; }
 [data-baseweb="select"] > div { background: #fff !important; border-radius: 10px !important; border-color: var(--line) !important; }
-[data-testid="stFileUploaderDropzone"] { background: #fffaf8; border: 1px dashed #e5c8c1; border-radius: 12px; }
+[data-testid="stFileUploaderDropzone"] { background: #faf8f6; border: 1px dashed #d6cec7; border-radius: 12px; }
 
 /* 확장 패널 · 표 · 진행바 · 슬라이더 · 이미지 */
 [data-testid="stExpander"] { background: #fff; border: 1px solid var(--line); border-radius: 12px; }
