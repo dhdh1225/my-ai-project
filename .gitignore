@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+client_secret.json
+token.json
+upload_log.json
+videos/*
+!videos/.gitkeep
+projects/
+presets.json
