@@ -738,33 +738,34 @@ with st.sidebar:
     st.text_input("Gemini API 키", type="password", key="api_key",
                   help="저장되지 않습니다. 환경변수 GEMINI_API_KEY 또는 Streamlit secrets에 두면 자동 입력됩니다.")
     st.selectbox("이미지 모델", list(IMAGE_MODELS), key="model_label")
-    st.text_input("이미지 모델 ID", key=f"mid_{ss.model_label}", help="모델 ID가 바뀌면 여기서 수정하세요.")
-    st.text_input("분석·프롬프트화 텍스트 모델", key="text_model")
     st.selectbox("화면 비율", ASPECT_RATIOS, key="aspect")
     st.selectbox("장면당 길이 (초 단위 분할)", SCENE_SECONDS, key="sec", format_func=lambda x: f"{x}초",
                  help="이미지 1장이 커버하는 시간")
     st.selectbox("이미지 속 글자 언어", list(IMAGE_LANGS), key="lang",
                  help="기본은 '언어 없음'(글자·자막·로고 없음). 언어를 고르면 간판·비문 같은 장면 속 글자만 "
                       "해당 언어로 허용하고 자막·로고·말풍선은 계속 금지합니다.")
-    st.selectbox("ZIP 이미지 파일명 규칙", list(NAME_RULES), key="name_rule")
-    st.checkbox("ZIP에 애니메이션 프롬프트(.txt)도 함께 넣기", key="zip_motion",
-                help="이미지와 같은 이름의 .txt 파일로 들어갑니다.")
-    st.checkbox("전체 자동 실행에 애니메이션 프롬프트 포함", key="motion_auto")
-    st.number_input("낭독 속도 (글자/초)", 3.0, 15.0, step=0.5, key="cps",
-                    help="공백 제외 글자 수로 영상 길이를 추정합니다.")
-    st.slider("동시 생성 수 (병렬)", 1, 10, key="workers",
-              help="값이 크면 빠르지만 429(속도 제한)가 늘 수 있습니다. 429가 감지되면 자동으로 낮춥니다.")
 
-    st.divider()
-    st.subheader("💾 프로젝트")
-    st.text_input("프로젝트 이름", key="project_name", help="projects/<이름>/ 폴더에 저장됩니다.")
-    st.checkbox("자동 저장", key="autosave", help="단계가 끝날 때마다, 이미지가 만들어질 때마다 저장합니다.")
-    c_s, c_l = st.columns(2)
-    if c_s.button("지금 저장", width="stretch"):
-        save_project(full=True)
-        st.toast("저장했습니다.")
-    st.selectbox("불러올 프로젝트", ["(선택)"] + list_projects(), key="load_choice")
-    c_l.button("📂 불러오기", width="stretch", on_click=load_project)
+    with st.expander("🔧 고급 설정"):
+        st.text_input("이미지 모델 ID", key=f"mid_{ss.model_label}", help="모델 ID가 바뀌면 여기서 수정하세요.")
+        st.text_input("분석·프롬프트화 텍스트 모델", key="text_model")
+        st.number_input("낭독 속도 (글자/초)", 3.0, 15.0, step=0.5, key="cps",
+                        help="공백 제외 글자 수로 영상 길이를 추정합니다.")
+        st.slider("동시 생성 수 (병렬)", 1, 10, key="workers",
+                  help="값이 크면 빠르지만 429(속도 제한)가 늘 수 있습니다. 429가 감지되면 자동으로 낮춥니다.")
+        st.selectbox("ZIP 이미지 파일명 규칙", list(NAME_RULES), key="name_rule")
+        st.checkbox("ZIP에 애니메이션 프롬프트(.txt)도 함께 넣기", key="zip_motion",
+                    help="이미지와 같은 이름의 .txt 파일로 들어갑니다.")
+        st.checkbox("전체 자동 실행에 애니메이션 프롬프트 포함", key="motion_auto")
+
+    with st.expander("💾 프로젝트 저장 / 불러오기"):
+        st.text_input("프로젝트 이름", key="project_name", help="projects/<이름>/ 폴더에 저장됩니다.")
+        st.checkbox("자동 저장", key="autosave", help="단계가 끝날 때마다, 이미지가 만들어질 때마다 저장합니다.")
+        c_s, c_l = st.columns(2)
+        if c_s.button("지금 저장", width="stretch"):
+            save_project(full=True)
+            st.toast("저장했습니다.")
+        st.selectbox("불러올 프로젝트", ["(선택)"] + list_projects(), key="load_choice")
+        c_l.button("📂 불러오기", width="stretch", on_click=load_project)
 
 api_key = ss.api_key
 model_label, text_model, aspect = ss.model_label, ss.text_model, ss.aspect
@@ -773,72 +774,77 @@ sec_per_scene, cps, image_lang, workers = ss.sec, ss.cps, ss.lang, ss.workers
 
 # ───────────────────────── 메인 입력 ─────────────────────────
 st.title("🖼️ 대본 → 이미지 자동 생성기")
-st.caption("대본분석 → 초 단위 분할 → 이미지 프롬프트화 → 이미지 병렬 생성 (Gemini API)")
+st.caption("대본을 붙여 넣고 실행 버튼만 누르면 됩니다. 세부 설정은 기본값으로 충분합니다.")
 
-col_a, col_b = st.columns([3, 2])
-with col_a:
-    txt_file = st.file_uploader("대본 .txt 불러오기 (선택)", type=["txt"])
+with st.expander("📄 .txt 파일로 대본 불러오기"):
+    txt_file = st.file_uploader("대본 .txt", type=["txt"], label_visibility="collapsed")
     if txt_file is not None and ss.get("_txt_name") != (txt_file.name, txt_file.size):
         ss._txt_name = (txt_file.name, txt_file.size)
         try:
             ss.script = txt_file.getvalue().decode("utf-8-sig")
         except UnicodeDecodeError:
             ss.script = txt_file.getvalue().decode("cp949", errors="replace")
-    st.text_area("📜 대본", height=280, key="script", placeholder="여기에 대본을 붙여 넣으세요.")
-    script = ss.script
-    chars, est_sec, est_n = estimate(script, sec_per_scene, cps)
-    if chars:
-        est_min = est_n * SEC_PER_IMAGE_GUESS / max(1, workers) / 60
-        st.caption(f"대본 {chars:,}자 · 추정 길이 {fmt_time(est_sec)} · 장면 {est_n}개 → 이미지 {est_n}장, "
-                   f"텍스트 호출 약 {math.ceil(est_n / 15) + 1}회 · 이미지 생성 예상 약 {est_min:.1f}분 "
-                   f"(장당 {SEC_PER_IMAGE_GUESS}초 가정, 실제와 다를 수 있음)")
-with col_b:
-    st.text_area("🧩 형식 이미지 프롬프트 (장면 묘사가 따를 규칙)", height=150, key="format_prompt")
-    format_prompt = ss.format_prompt
-    st.text_area("🎞️ 애니메이션 지시 규칙 (움직임 프롬프트가 따를 규칙)", height=120, key="motion_rule")
-    motion_rule = ss.motion_rule
-    st.text_input("🔇 항상 붙일 무음 지시문 (대사·배경음악 없음)", key="silent_rule",
-                  help="모든 애니메이션 프롬프트 끝에 자동으로 붙습니다. 표에서 지워도 내보낼 때 다시 붙습니다.")
 
-    options = list(BUILTIN_PRESETS) + list(load_custom_presets()) + [CUSTOM_LABEL]
-    if ss.preset not in options:
-        ss.preset = CUSTOM_LABEL
-    st.selectbox("🎨 스타일 가이드", options, key="preset", on_change=on_preset_change)
-    st.text_area("스타일 가이드 내용 (수정 가능)", height=140, key="style",
-                 placeholder="예: A watercolor illustration ... The scene depicts")
-    style = ss.style
-    p1, p2, p3 = st.columns([2, 1, 1])
-    p1.text_input("내 프리셋으로 저장할 이름", key="new_preset_name", label_visibility="collapsed",
-                  placeholder="프리셋 이름 입력 후 저장")
-    p2.button("저장", on_click=save_preset, width="stretch")
-    p3.button("삭제", on_click=delete_preset, width="stretch", disabled=ss.preset not in load_custom_presets())
+st.text_area("📜 대본", height=260, key="script", placeholder="여기에 대본을 붙여 넣으세요.")
+script = ss.script
+chars, est_sec, est_n = estimate(script, sec_per_scene, cps)
+if chars:
+    est_min = est_n * SEC_PER_IMAGE_GUESS / max(1, workers) / 60
+    st.caption(f"대본 {chars:,}자 · 추정 길이 {fmt_time(est_sec)} · 장면 {est_n}개 → 이미지 {est_n}장, "
+               f"텍스트 호출 약 {math.ceil(est_n / 15) + 1}회 · 이미지 생성 예상 약 {est_min:.1f}분 "
+               f"(장당 {SEC_PER_IMAGE_GUESS}초 가정, 실제와 다를 수 있음)")
 
-    ref_files = st.file_uploader(f"🧷 레퍼런스 이미지 (최대 {MAX_REFS}장, 인물·소품 일관성용)",
-                                 type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True)
-    if ref_files:
-        ss.refs = [{"name": f.name, "data": f.getvalue(), "mime": f.type or "image/png"} for f in ref_files[:MAX_REFS]]
-    if ss.refs:
-        rc = st.columns(len(ss.refs))
-        for c, r in zip(rc, ss.refs):
-            c.image(r["data"], caption=r["name"][:12], width="stretch")
-        if st.button("레퍼런스 비우기"):
-            ss.refs = []
-            st.rerun()
+run_all = st.button("🚀 전체 자동 실행", type="primary", width="stretch",
+                    help="분석 → 분할 → 프롬프트 → (움직임 프롬프트) → 이미지 생성을 한 번에 진행합니다.")
 
-b1, b2, b3, b4, b5, b6 = st.columns(6)
-run_all = b1.button("🚀 전체 자동 실행", type="primary", width="stretch")
-run1 = b2.button("1 대본 분석", width="stretch")
-run2 = b3.button("2 초 단위 분할", width="stretch")
-run3 = b4.button("3 프롬프트화", width="stretch")
-run4 = b5.button("4 이미지 생성", width="stretch",
-                 help="이어서 생성: 이미 만든 이미지는 건너뛰고 없는 장면만 생성합니다.")
-run6 = b6.button("5 움직임 프롬프트", width="stretch", help="장면별 이미지-투-비디오용 움직임 지시문을 만듭니다.")
-t1, t2, t3, t4 = st.columns([1, 1, 1, 1])
-ss.test_no = min(max(1, int(ss.test_no)), max(1, len(ss.scenes)))
-test_no = t1.number_input("테스트 장면 번호", 1, max(1, len(ss.scenes)), key="test_no")
-run_test = t2.button("🧪 이 장면만 1장 테스트", width="stretch")
-run_fail = t3.button("♻️ 실패 장면 전부 재생성", width="stretch")
-t4.checkbox("완료된 이미지도 모두 다시 생성", key="force_all")
+with st.expander("🎨 스타일 · 규칙 설정 (기본값으로 충분해요)"):
+    tab_style, tab_rule, tab_motion, tab_ref = st.tabs(["스타일", "장면 묘사 규칙", "움직임 규칙", "레퍼런스 이미지"])
+    with tab_style:
+        options = list(BUILTIN_PRESETS) + list(load_custom_presets()) + [CUSTOM_LABEL]
+        if ss.preset not in options:
+            ss.preset = CUSTOM_LABEL
+        st.selectbox("스타일 프리셋", options, key="preset", on_change=on_preset_change)
+        st.text_area("스타일 가이드 내용 (수정 가능)", height=140, key="style",
+                     placeholder="예: A watercolor illustration ... The scene depicts")
+        p1, p2, p3 = st.columns([2, 1, 1])
+        p1.text_input("내 프리셋으로 저장할 이름", key="new_preset_name", label_visibility="collapsed",
+                      placeholder="프리셋 이름 입력 후 저장")
+        p2.button("저장", on_click=save_preset, width="stretch")
+        p3.button("삭제", on_click=delete_preset, width="stretch", disabled=ss.preset not in load_custom_presets())
+    with tab_rule:
+        st.text_area("형식 이미지 프롬프트 (장면 묘사가 따를 규칙)", height=150, key="format_prompt")
+    with tab_motion:
+        st.text_area("애니메이션 지시 규칙 (움직임 프롬프트가 따를 규칙)", height=120, key="motion_rule")
+        st.text_input("🔇 항상 붙일 무음 지시문 (대사·배경음악 없음)", key="silent_rule",
+                      help="모든 애니메이션 프롬프트 끝에 자동으로 붙습니다. 표에서 지워도 내보낼 때 다시 붙습니다.")
+    with tab_ref:
+        ref_files = st.file_uploader(f"레퍼런스 이미지 (최대 {MAX_REFS}장, 인물·소품 일관성용)",
+                                     type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True)
+        if ref_files:
+            ss.refs = [{"name": f.name, "data": f.getvalue(), "mime": f.type or "image/png"} for f in ref_files[:MAX_REFS]]
+        if ss.refs:
+            rc = st.columns(len(ss.refs))
+            for c, r in zip(rc, ss.refs):
+                c.image(r["data"], caption=r["name"][:12], width="stretch")
+            if st.button("레퍼런스 비우기"):
+                ss.refs = []
+                st.rerun()
+style, format_prompt, motion_rule = ss.style, ss.format_prompt, ss.motion_rule
+
+with st.expander("🧪 단계별 실행 · 테스트 · 재생성"):
+    b1, b2, b3, b4, b5 = st.columns(5)
+    run1 = b1.button("1 분석", width="stretch")
+    run2 = b2.button("2 분할", width="stretch")
+    run3 = b3.button("3 프롬프트화", width="stretch")
+    run4 = b4.button("4 이미지 생성", width="stretch",
+                     help="이어서 생성: 이미 만든 이미지는 건너뛰고 없는 장면만 생성합니다.")
+    run6 = b5.button("5 움직임 프롬프트", width="stretch", help="장면별 이미지-투-비디오용 움직임 지시문을 만듭니다.")
+    t1, t2, t3, t4 = st.columns([1, 1, 1, 1])
+    ss.test_no = min(max(1, int(ss.test_no)), max(1, len(ss.scenes)))
+    test_no = t1.number_input("테스트 장면 번호", 1, max(1, len(ss.scenes)), key="test_no")
+    run_test = t2.button("🧪 이 장면만 1장 테스트", width="stretch")
+    run_fail = t3.button("♻️ 실패 장면 전부 재생성", width="stretch")
+    t4.checkbox("완료된 이미지도 모두 다시 생성", key="force_all")
 
 
 def need_key() -> bool:
@@ -954,6 +960,7 @@ def do_images(only=None, force=False):
     render_grid(holder, ss.scenes)
     run_parallel(get_client(api_key), model_id, aspect, targets, workers, on_done, ss.refs, throttle)
     bar.empty()
+    holder.empty()
     fails = [t for t in targets if not by_idx[t["idx"]].get("image")]
     (st.warning if fails else st.success)(f"완료: 성공 {len(targets) - len(fails)} / 실패 {len(fails)}")
     if throttle.cuts:
@@ -996,87 +1003,95 @@ except Exception as e:  # noqa: BLE001
 
 # ───────────────────────── 결과 표시 ─────────────────────────
 if ss.analysis:
-    with st.expander("📊 1. 대본 분석 결과", expanded=False):
+    with st.expander("📊 대본 분석 결과", expanded=False):
         st.json(ss.analysis)
 
 if ss.scenes:
     n_img = sum(1 for s in ss.scenes if s.get("image"))
-    st.subheader(f"🎬 장면 {len(ss.scenes)}개 · 이미지 {n_img}장 완료 · 추정 길이 {fmt_time(ss.total_sec)}")
-    rows = [{"번호": s["idx"], "시간": f'{fmt_time(s["start"])}~{fmt_time(s["end"])}',
-             "대본(수정 가능)": s["text"], "프롬프트(수정 가능)": s.get("prompt", ""),
-             "애니메이션 프롬프트(수정 가능)": s.get("motion", "")} for s in ss.scenes]
-    edited = st.data_editor(rows, width="stretch", hide_index=True, disabled=["번호", "시간"],
-                            key=f"editor_{ss.editor_ver}", height=min(500, 60 + 38 * len(rows)))
-    for s, row in zip(ss.scenes, edited):  # 편집 내용을 상태에 반영
-        s["prompt"] = row["프롬프트(수정 가능)"]
-        s["text"] = row["대본(수정 가능)"]
-        s["motion"] = row["애니메이션 프롬프트(수정 가능)"]
+    st.subheader(f"장면 {len(ss.scenes)}개 · 이미지 {n_img}장 완료 · 추정 길이 {fmt_time(ss.total_sec)}")
+    tab_scenes, tab_images, tab_export = st.tabs(["🎬 장면 · 프롬프트", "🖼️ 이미지", "📦 내보내기"])
 
-    with st.expander("✂️ 장면 합치기 / 나누기 · 선택 장면 프롬프트 재작성"):
-        ids = [s["idx"] for s in ss.scenes]
-        e1, e2, e3 = st.columns([1, 2, 2])
-        ss.edit_k = min(max(1, int(ss.edit_k)), len(ids))
-        k = e1.number_input("장면 번호", 1, len(ids), key="edit_k")
-        do_merge = e2.button("➕ 다음 장면과 합치기", width="stretch")
-        do_split_btn = e3.button("✂️ 이 장면 둘로 나누기", width="stretch")
-        pick_rw = st.multiselect("프롬프트를 다시 만들 장면", ids, key="rw_pick")
-        r1, r2 = st.columns(2)
-        do_rw = r1.button("✍️ 선택 장면 이미지 프롬프트만 재작성 (이미지는 삭제됨)", width="stretch")
-        do_mo = r2.button("🎞️ 선택 장면 애니메이션 프롬프트만 재작성", width="stretch")
-        try:
-            changed = None
-            if do_merge:
-                new = merge_scenes(ss.scenes, int(k))
-                changed = {new} if new else None
-                if not new:
-                    st.warning("마지막 장면은 합칠 다음 장면이 없습니다.")
-            elif do_split_btn:
-                new = split_scene(ss.scenes, int(k))
-                changed = set(new) if new else None
-                if not new:
-                    st.warning("이 장면은 더 나눌 수 없습니다.")
-            if changed:
-                bump()
-                if api_key:
-                    rewrite_prompts(changed)
-                else:
-                    autosave(full=True)
-                st.rerun()
-            if do_mo and need_key():
-                if pick_rw:
-                    do_motion(set(pick_rw))
-                    st.rerun()
-                else:
-                    st.warning("장면 번호를 선택하세요.")
-            if do_rw and need_key():
-                if pick_rw:
-                    rewrite_prompts(set(pick_rw))
-                    st.rerun()
-                else:
-                    st.warning("장면 번호를 선택하세요.")
-        except Exception as e:  # noqa: BLE001
-            st.error(f"오류: {e}")
+    with tab_scenes:
+        rows = [{"번호": s["idx"], "시간": f'{fmt_time(s["start"])}~{fmt_time(s["end"])}',
+                 "대본(수정 가능)": s["text"], "프롬프트(수정 가능)": s.get("prompt", ""),
+                 "애니메이션 프롬프트(수정 가능)": s.get("motion", "")} for s in ss.scenes]
+        edited = st.data_editor(rows, width="stretch", hide_index=True, disabled=["번호", "시간"],
+                                key=f"editor_{ss.editor_ver}", height=min(500, 60 + 38 * len(rows)))
+        for s, row in zip(ss.scenes, edited):  # 편집 내용을 상태에 반영
+            s["prompt"] = row["프롬프트(수정 가능)"]
+            s["text"] = row["대본(수정 가능)"]
+            s["motion"] = row["애니메이션 프롬프트(수정 가능)"]
 
-    if any(s.get("image") or s.get("error") for s in ss.scenes):
-        st.subheader("🖼️ 생성 결과")
-        render_grid(st.container(), ss.scenes)
-        bad = [s["idx"] for s in ss.scenes if not s.get("image") and s.get("prompt")]
-        pick = st.multiselect("다시 생성할 장면 번호", [s["idx"] for s in ss.scenes], default=bad)
-        if st.button("♻️ 선택 장면 재생성") and need_key():
+        with st.expander("✂️ 장면 합치기 / 나누기 · 선택 장면 프롬프트 재작성"):
+            ids = [s["idx"] for s in ss.scenes]
+            e1, e2, e3 = st.columns([1, 2, 2])
+            ss.edit_k = min(max(1, int(ss.edit_k)), len(ids))
+            k = e1.number_input("장면 번호", 1, len(ids), key="edit_k")
+            do_merge = e2.button("➕ 다음 장면과 합치기", width="stretch")
+            do_split_btn = e3.button("✂️ 이 장면 둘로 나누기", width="stretch")
+            pick_rw = st.multiselect("프롬프트를 다시 만들 장면", ids, key="rw_pick")
+            r1, r2 = st.columns(2)
+            do_rw = r1.button("✍️ 선택 장면 이미지 프롬프트만 재작성 (이미지는 삭제됨)", width="stretch")
+            do_mo = r2.button("🎞️ 선택 장면 애니메이션 프롬프트만 재작성", width="stretch")
             try:
-                do_images(only=set(pick))
-                st.rerun()
+                changed = None
+                if do_merge:
+                    new = merge_scenes(ss.scenes, int(k))
+                    changed = {new} if new else None
+                    if not new:
+                        st.warning("마지막 장면은 합칠 다음 장면이 없습니다.")
+                elif do_split_btn:
+                    new = split_scene(ss.scenes, int(k))
+                    changed = set(new) if new else None
+                    if not new:
+                        st.warning("이 장면은 더 나눌 수 없습니다.")
+                if changed:
+                    bump()
+                    if api_key:
+                        rewrite_prompts(changed)
+                    else:
+                        autosave(full=True)
+                    st.rerun()
+                if do_mo and need_key():
+                    if pick_rw:
+                        do_motion(set(pick_rw))
+                        st.rerun()
+                    else:
+                        st.warning("장면 번호를 선택하세요.")
+                if do_rw and need_key():
+                    if pick_rw:
+                        rewrite_prompts(set(pick_rw))
+                        st.rerun()
+                    else:
+                        st.warning("장면 번호를 선택하세요.")
             except Exception as e:  # noqa: BLE001
                 st.error(f"오류: {e}")
 
-    d1, d2, d3, d4 = st.columns(4)
-    if any(s.get("image") for s in ss.scenes):
-        d1.download_button("⬇️ 이미지 ZIP", make_zip(ss.scenes, ss.name_rule, ss.zip_motion, ss.silent_rule), "images.zip",
-                           "application/zip", width="stretch")
-    if any(s.get("motion") for s in ss.scenes):
-        d4.download_button("⬇️ 애니메이션 프롬프트 TXT", make_motion_txt(ss.scenes, ss.silent_rule), "motion_prompts.txt",
-                           "text/plain", width="stretch")
-    d2.download_button("⬇️ 장면/프롬프트 CSV", make_csv(ss.scenes, ss.silent_rule), "scenes.csv", "text/csv", width="stretch")
-    d3.download_button("⬇️ 자막/타임코드 SRT", make_srt(ss.scenes), "scenes.srt", "application/x-subrip",
-                       width="stretch")
+    with tab_images:
+        if any(s.get("image") or s.get("error") for s in ss.scenes):
+            render_grid(st.container(), ss.scenes)
+            bad = [s["idx"] for s in ss.scenes if not s.get("image") and s.get("prompt")]
+            pick = st.multiselect("다시 생성할 장면 번호", [s["idx"] for s in ss.scenes], default=bad)
+            if st.button("♻️ 선택 장면 재생성") and need_key():
+                try:
+                    do_images(only=set(pick))
+                    st.rerun()
+                except Exception as e:  # noqa: BLE001
+                    st.error(f"오류: {e}")
+        else:
+            st.info("아직 만들어진 이미지가 없습니다. 위의 '🚀 전체 자동 실행'을 눌러 주세요.")
+
+    with tab_export:
+        d1, d2 = st.columns(2)
+        if any(s.get("image") for s in ss.scenes):
+            d1.download_button("⬇️ 이미지 ZIP", make_zip(ss.scenes, ss.name_rule, ss.zip_motion, ss.silent_rule),
+                               "images.zip", "application/zip", width="stretch")
+        d2.download_button("⬇️ 장면/프롬프트 CSV", make_csv(ss.scenes, ss.silent_rule), "scenes.csv", "text/csv",
+                           width="stretch")
+        d3, d4 = st.columns(2)
+        d3.download_button("⬇️ 자막/타임코드 SRT", make_srt(ss.scenes), "scenes.srt", "application/x-subrip",
+                           width="stretch")
+        if any(s.get("motion") for s in ss.scenes):
+            d4.download_button("⬇️ 애니메이션 프롬프트 TXT", make_motion_txt(ss.scenes, ss.silent_rule),
+                               "motion_prompts.txt", "text/plain", width="stretch")
     autosave()
