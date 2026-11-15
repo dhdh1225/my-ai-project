@@ -1,0 +1,7 @@
+# 연핑크 테마 (선택 파일: 없어도 app.py의 CSS로 동작하며, 이 파일은 다크모드에서도 글씨가 보이게 해 줍니다)
+[theme]
+base = "light"
+primaryColor = "#f06292"
+backgroundColor = "#fff1f6"
+secondaryBackgroundColor = "#ffe3ec"
+textColor = "#4a2c3a"

@@ -510,8 +510,50 @@ def make_srt(scenes) -> bytes:
 
 
 # ───────────────────────── 앱 ─────────────────────────
-st.set_page_config(page_title="대본 → 이미지 생성기", page_icon="🖼️", layout="wide")
+st.set_page_config(page_title="대본 → 이미지 생성기", page_icon="🌸", layout="wide")
 ss = st.session_state
+
+PINK_CSS = """
+<style>
+.stApp { background: linear-gradient(180deg, #fff1f6 0%, #ffe4ee 100%); color: #4a2c3a; }
+[data-testid="stHeader"] { background: transparent; }
+[data-testid="stSidebar"] { background: linear-gradient(180deg, #ffe9f1 0%, #ffdce8 100%);
+    border-right: 1px solid #f8c9d9; }
+h1, h2, h3 { color: #b83b6b !important; letter-spacing: -0.01em; }
+h1 { text-shadow: 0 2px 0 #ffd9e6; }
+[data-testid="stCaptionContainer"], .stCaption { color: #8a4a64 !important; }
+
+/* 버튼 */
+.stButton > button, .stDownloadButton > button {
+    background: #ffffff; color: #a2335f; border: 1px solid #f4a6c0; border-radius: 12px;
+    transition: all .15s ease; box-shadow: 0 1px 0 #f8d3e1; }
+.stButton > button:hover, .stDownloadButton > button:hover {
+    background: #ffd6e5; border-color: #ee7ca3; color: #8c2250; transform: translateY(-1px); }
+.stButton > button[kind="primary"] {
+    background: linear-gradient(135deg, #ff9fc2 0%, #f06292 100%); color: #fff; border: none;
+    box-shadow: 0 3px 10px rgba(240, 98, 146, .35); }
+.stButton > button[kind="primary"]:hover { filter: brightness(1.05); color: #fff; }
+
+/* 입력창 */
+textarea, input { background: #ffffff !important; color: #4a2c3a !important; }
+[data-baseweb="textarea"], [data-baseweb="input"], [data-baseweb="base-input"] {
+    background: #ffffff !important; border-radius: 12px !important; border-color: #f4c2d3 !important; }
+[data-baseweb="textarea"]:focus-within, [data-baseweb="input"]:focus-within {
+    border-color: #f06292 !important; box-shadow: 0 0 0 2px rgba(240, 98, 146, .18) !important; }
+[data-baseweb="select"] > div { background: #ffffff !important; border-radius: 12px !important;
+    border-color: #f4c2d3 !important; }
+[data-testid="stFileUploaderDropzone"] { background: #fff2f7; border: 1px dashed #f19ab9; border-radius: 14px; }
+
+/* 확장 패널 · 표 · 진행바 · 슬라이더 */
+[data-testid="stExpander"] { background: #fff9fb; border: 1px solid #f8c9d9; border-radius: 14px; }
+[data-testid="stDataFrame"], [data-testid="stDataEditor"] { border-radius: 12px; border: 1px solid #f8c9d9; }
+.stProgress > div > div > div > div { background-color: #f06292 !important; }
+[data-testid="stSlider"] [role="slider"] { background-color: #f06292 !important; }
+[data-testid="stImage"] img { border-radius: 12px; box-shadow: 0 2px 8px rgba(240, 98, 146, .18); }
+hr { border-color: #f8c9d9 !important; }
+</style>
+"""
+st.markdown(PINK_CSS, unsafe_allow_html=True)
 
 
 def _default_api_key() -> str:
@@ -697,7 +739,7 @@ model_id = ss[f"mid_{model_label}"]
 sec_per_scene, cps, image_lang, workers = ss.sec, ss.cps, ss.lang, ss.workers
 
 # ───────────────────────── 메인 입력 ─────────────────────────
-st.title("🖼️ 대본 → 이미지 자동 생성기")
+st.title("🌸 대본 → 이미지 자동 생성기")
 st.caption("대본분석 → 초 단위 분할 → 이미지 프롬프트화 → 이미지 병렬 생성 (Gemini API)")
 
 col_a, col_b = st.columns([3, 2])
@@ -732,11 +774,11 @@ with col_b:
     st.text_area("스타일 가이드 내용 (수정 가능)", height=140, key="style",
                  placeholder="예: A watercolor illustration ... The scene depicts")
     style = ss.style
-    p1, p2, p3 = st.columns([3, 1, 1])
+    p1, p2, p3 = st.columns([2, 1, 1])
     p1.text_input("내 프리셋으로 저장할 이름", key="new_preset_name", label_visibility="collapsed",
                   placeholder="프리셋 이름 입력 후 저장")
-    p2.button("💾 저장", on_click=save_preset, width="stretch")
-    p3.button("🗑️ 삭제", on_click=delete_preset, width="stretch", disabled=ss.preset not in load_custom_presets())
+    p2.button("저장", on_click=save_preset, width="stretch")
+    p3.button("삭제", on_click=delete_preset, width="stretch", disabled=ss.preset not in load_custom_presets())
 
     ref_files = st.file_uploader(f"🧷 레퍼런스 이미지 (최대 {MAX_REFS}장, 인물·소품 일관성용)",
                                  type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True)
