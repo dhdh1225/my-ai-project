@@ -53,8 +53,9 @@ def lang_directive(lang: str) -> str:
     if name is None:
         return ("The image must contain no text of any kind: no letters, numbers, captions, "
                 "signs with writing, logos, watermarks or speech bubbles.")
-    return (f"Any text that appears in the image (signs, labels, inscriptions, captions) must be "
-            f"written in {name} only. Keep text minimal, short and spelled correctly.")
+    return ("Never add subtitles, captions, logos, watermarks or speech bubbles. "
+            f"The only text allowed is minimal in-scene writing (signs, labels, inscriptions), "
+            f"which must be written in {name} only and spelled correctly.")
 
 
 def fmt_time(sec: float) -> str:
@@ -300,8 +301,8 @@ with st.sidebar:
     aspect = st.selectbox("화면 비율", ASPECT_RATIOS)
     sec_per_scene = st.selectbox("장면당 길이 (초 단위 분할)", SCENE_SECONDS, index=2,
                                  format_func=lambda x: f"{x}초", help="이미지 1장이 커버하는 시간")
-    image_lang = st.selectbox("이미지 속 글자 언어", list(IMAGE_LANGS),
-                              help="이미지에 들어가는 글자의 언어. '언어 없음'은 글자를 넣지 않습니다.")
+    image_lang = st.selectbox("이미지 속 글자 언어", list(IMAGE_LANGS), index=3,
+                              help="기본은 '언어 없음'(글자·자막·로고 없음). 언어를 고르면 간판·비문 같은 장면 속 글자만 해당 언어로 허용하고 자막·로고·말풍선은 계속 금지합니다.")
     cps = st.number_input("낭독 속도 (글자/초)", 3.0, 15.0, 7.0, 0.5,
                           help="공백 제외 글자 수로 영상 길이를 추정합니다.")
     workers = st.slider("동시 생성 수 (병렬)", 1, 10, 4, 1,
