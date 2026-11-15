@@ -450,22 +450,30 @@ def list_projects():
 
 
 # ───────────────────────── 결과 보조 ─────────────────────────
-def render_grid(container, scenes, cols=4):
-    with container.container():
-        for r in range(0, len(scenes), cols):
-            row = st.columns(cols)
-            for c, s in zip(row, scenes[r:r + cols]):
-                with c:
-                    cap = f'#{s["idx"]} {fmt_time(s["start"])}~{fmt_time(s["end"])}'
-                    if s.get("image"):
-                        try:
-                            st.image(s["image"], caption=cap, width="stretch")
-                        except Exception:  # noqa: BLE001 - 깨진 이미지 하나로 화면이 죽지 않게
-                            st.error(f"{cap}\n이미지를 표시할 수 없음")
-                    elif s.get("error"):
-                        st.error(f"{cap}\n실패: {s['error'][:80]}")
-                    else:
-                        st.info(f"{cap}\n대기/생성 중…")
+def render_scene_row(slot, sc):
+    """한 장면을 한 줄로 그린다: 이미지 | 대본. 가로형은 이미지를 넓게, 세로형은 대본을 넓게."""
+    portrait = st.session_state.get("aspect") in ("9:16", "3:4")
+    with slot.container():
+        left, right = st.columns([2, 3] if portrait else [3, 2], vertical_alignment="center")
+        with left:
+            if sc.get("image"):
+                try:
+                    st.image(sc["image"], width="stretch")
+                except Exception:  # noqa: BLE001 - 깨진 이미지 하나로 화면이 죽지 않게
+                    st.error("이미지를 표시할 수 없음")
+            elif sc.get("error"):
+                st.error(f"생성 실패: {sc['error'][:120]}")
+            else:
+                st.info("⏳ 생성 대기/진행 중…")
+        with right:
+            st.markdown(f'**#{sc["idx"]}** · {fmt_time(sc["start"])}~{fmt_time(sc["end"])}')
+            st.write(sc["text"])
+
+
+def render_rows(container, scenes):
+    """장면 1..N을 위에서 아래로 한 줄씩 그린다."""
+    for sc in scenes:
+        render_scene_row(container.empty(), sc)
 
 
 def scene_filename(sc, rule: str) -> str:
@@ -943,8 +951,13 @@ def do_images(only=None, force=False):
         t.pop("error", None)
         t["gen_prompt"] = f'{t["prompt"].strip()} {directive}{ref_hint}'
     throttle = Throttle(workers)
-    holder = st.empty()
     bar = st.progress(0.0, text=f"4/4 이미지 생성 0/{len(targets)} (동시 {workers}개)")
+    holder = st.empty()
+    slots = {}
+    with holder.container():  # 장면 1..N 줄을 미리 만들어 두고, 끝나는 줄부터 채운다
+        for sc in ss.scenes:
+            slots[sc["idx"]] = st.empty()
+            render_scene_row(slots[sc["idx"]], sc)
     done = [0]
 
     def on_done(idx, img, err):
@@ -955,9 +968,7 @@ def do_images(only=None, force=False):
             save_image(by_idx[idx])
         bar.progress(done[0] / len(targets),
                      text=f"4/4 이미지 생성 {done[0]}/{len(targets)} (현재 동시 {throttle.limit}개)")
-        render_grid(holder, ss.scenes)
-
-    render_grid(holder, ss.scenes)
+        render_scene_row(slots[idx], by_idx[idx])  # 이 장면의 줄만 갱신
     run_parallel(get_client(api_key), model_id, aspect, targets, workers, on_done, ss.refs, throttle)
     bar.empty()
     holder.empty()
@@ -1069,7 +1080,7 @@ if ss.scenes:
 
     with tab_images:
         if any(s.get("image") or s.get("error") for s in ss.scenes):
-            render_grid(st.container(), ss.scenes)
+            render_rows(st.container(), ss.scenes)
             bad = [s["idx"] for s in ss.scenes if not s.get("image") and s.get("prompt")]
             pick = st.multiselect("다시 생성할 장면 번호", [s["idx"] for s in ss.scenes], default=bad)
             if st.button("♻️ 선택 장면 재생성") and need_key():
