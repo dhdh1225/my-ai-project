@@ -8,11 +8,14 @@ import csv
 import io
 import json
 import math
+import os
 import random
 import re
+import threading
 import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 import streamlit as st
 
@@ -25,6 +28,8 @@ DEFAULT_TEXT_MODEL = "gemini-2.5-flash"
 ASPECT_RATIOS = ["16:9", "9:16", "1:1", "4:3", "3:4"]
 SCENE_SECONDS = [3, 4, 5, 6, 10, 15, 20]
 IMAGE_LANGS = {"한국어": "Korean (Hangul)", "일본어": "Japanese", "영어": "English", "언어 없음": None}
+MAX_REFS = 5
+SEC_PER_IMAGE_GUESS = 15  # 예상 시간 계산용 가정값 (실제와 다를 수 있음)
 
 JIGU_STYLE = (
     "A clean, fully realized 2D vector illustration suitable for an educational "
@@ -34,7 +39,8 @@ JIGU_STYLE = (
     "appropriate to the specific time period and setting described. No empty "
     "negative space. The scene depicts"
 )
-STYLE_PRESETS = {"지구박물관 (기본)": JIGU_STYLE, "직접 입력": ""}
+BUILTIN_PRESETS = {"지구박물관 (기본)": JIGU_STYLE}
+CUSTOM_LABEL = "직접 입력"
 
 DEFAULT_FORMAT_PROMPT = (
     "각 장면 묘사는 영어 한 문단(2~3문장)으로, 아래 순서를 따른다.\n"
@@ -43,7 +49,14 @@ DEFAULT_FORMAT_PROMPT = (
     "- 대본에 없는 사실을 지어내지 않는다."
 )
 
-PRIVATE_ERR_HINTS = ("429", "RESOURCE_EXHAUSTED", "503", "UNAVAILABLE", "500", "INTERNAL", "timed out", "timeout")
+RETRIABLE_HINTS = ("429", "RESOURCE_EXHAUSTED", "503", "UNAVAILABLE", "500", "INTERNAL", "timed out", "timeout")
+
+PROJECTS_DIR = Path("projects")
+PRESETS_FILE = Path("presets.json")
+
+# 프로젝트에 저장/복원하는 입력 위젯 키 (API 키는 저장하지 않음)
+INPUT_KEYS = ["script", "format_prompt", "style", "preset", "model_label", "text_model", "aspect",
+              "sec", "cps", "lang", "workers"] + [f"mid_{k}" for k in IMAGE_MODELS]
 
 
 # ───────────────────────── 유틸 ─────────────────────────
@@ -61,6 +74,32 @@ def lang_directive(lang: str) -> str:
 def fmt_time(sec: float) -> str:
     sec = int(round(sec))
     return f"{sec // 60:02d}:{sec % 60:02d}"
+
+
+def srt_time(t: float) -> str:
+    ms = int(round(t * 1000))
+    h, ms = divmod(ms, 3600000)
+    m, ms = divmod(ms, 60000)
+    s, ms = divmod(ms, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def img_ext(b: bytes) -> str:
+    if b[:3] == b"\xff\xd8\xff":
+        return "jpg"
+    if b[:4] == b"RIFF":
+        return "webp"
+    return "png"
+
+
+def safe_name(n: str) -> str:
+    n = re.sub(r"[^\w\-]+", "_", (n or "").strip(), flags=re.UNICODE).strip("_")
+    return n or "project"
+
+
+def script_hash(text: str) -> str:
+    import hashlib
+    return hashlib.md5(text.strip().encode("utf-8")).hexdigest()
 
 
 def get_client(api_key: str):
@@ -127,33 +166,92 @@ def _units(text: str, max_len: int):
     return out
 
 
+def _nsp(t: str) -> int:
+    return len(re.sub(r"\s", "", t))
+
+
+def estimate(script: str, sec_per_scene: int, cps: float):
+    """(공백 제외 글자 수, 추정 초, 장면 수)"""
+    chars = _nsp(script)
+    if chars == 0:
+        return 0, 0.0, 0
+    total = chars / cps
+    return chars, total, max(1, math.ceil(total / sec_per_scene))
+
+
 def split_script(script: str, sec_per_scene: int, chars_per_sec: float):
     """글자 수/낭독 속도로 전체 길이를 추정해 장면당 sec_per_scene초가 되도록 분할."""
     text = script.strip()
-    total_chars = len(re.sub(r"\s", "", text))
+    total_chars, total_sec, n = estimate(text, sec_per_scene, chars_per_sec)
     if total_chars == 0:
         return [], 0.0
-    total_sec = total_chars / chars_per_sec
-    n = max(1, math.ceil(total_sec / sec_per_scene))
     target = total_chars / n  # 장면당 목표 글자 수 (공백 제외)
 
     units = _units(text, max(10, int(target * 1.6)))
     groups = [[] for _ in range(n)]
     cum = 0
     for u in units:
-        ln = len(re.sub(r"\s", "", u))
-        mid = cum + ln / 2
-        groups[min(n - 1, int(mid / target))].append(u)
+        ln = _nsp(u)
+        groups[min(n - 1, int((cum + ln / 2) / target))].append(u)
         cum += ln
     groups = [g for g in groups if g]
 
     scenes, t = [], 0.0
     for i, g in enumerate(groups, 1):
         body = " ".join(g)
-        dur = len(re.sub(r"\s", "", body)) / chars_per_sec
+        dur = _nsp(body) / chars_per_sec
         scenes.append({"idx": i, "start": t, "end": t + dur, "text": body})
         t += dur
     return scenes, total_sec
+
+
+def renumber(scenes):
+    for i, s in enumerate(scenes, 1):
+        s["idx"] = i
+
+
+def merge_scenes(scenes, k: int):
+    """k번 장면을 다음 장면과 합친다. 합쳐진 장면의 번호를 반환 (불가하면 None)."""
+    pos = next((i for i, s in enumerate(scenes) if s["idx"] == k), None)
+    if pos is None or pos + 1 >= len(scenes):
+        return None
+    a, b = scenes[pos], scenes[pos + 1]
+    scenes[pos:pos + 2] = [{"idx": 0, "start": a["start"], "end": b["end"], "text": f'{a["text"]} {b["text"]}'.strip(),
+                            "desc": a.get("desc", ""), "prompt": a.get("prompt", "")}]
+    renumber(scenes)
+    return pos + 1
+
+
+def split_scene(scenes, k: int):
+    """k번 장면을 문장(또는 단어) 경계에서 둘로 나눈다. 나뉜 두 장면 번호를 반환."""
+    pos = next((i for i, s in enumerate(scenes) if s["idx"] == k), None)
+    if pos is None:
+        return None
+    s = scenes[pos]
+    text = s["text"].strip()
+    parts = _units(text, 10 ** 9)
+    if len(parts) < 2:
+        parts = text.split()
+    if len(parts) >= 2:
+        total = sum(len(p) for p in parts)
+        run, best, cut = 0, None, 1
+        for j in range(1, len(parts)):
+            run += len(parts[j - 1])
+            d = abs(run - total / 2)
+            if best is None or d < best:
+                best, cut = d, j
+        first, second = " ".join(parts[:cut]), " ".join(parts[cut:])
+    elif len(text) >= 2:
+        first, second = text[:len(text) // 2], text[len(text) // 2:]
+    else:
+        return None
+    ratio = len(first) / max(1, len(first) + len(second))
+    mid = s["start"] + (s["end"] - s["start"]) * ratio
+    base = {"desc": s.get("desc", ""), "prompt": s.get("prompt", "")}
+    scenes[pos:pos + 1] = [{"idx": 0, "start": s["start"], "end": mid, "text": first, **base},
+                           {"idx": 0, "start": mid, "end": s["end"], "text": second, **base}]
+    renumber(scenes)
+    return pos + 1, pos + 2
 
 
 # ───────────────────────── 3단계: 이미지 프롬프트화 ─────────────────────────
@@ -197,43 +295,74 @@ def compose_prompt(style: str, scene_desc: str) -> str:
 
 
 # ───────────────────────── 4단계: 이미지 병렬 생성 ─────────────────────────
-def generate_one(client, model: str, prompt: str, aspect: str):
+class Throttle:
+    """동시 실행 수 제한. 429가 감지되면 한도를 자동으로 1씩 낮춘다."""
+
+    def __init__(self, limit: int):
+        self.limit, self.initial, self.active, self.cuts = limit, limit, 0, 0
+        self.cv = threading.Condition()
+        self.last_cut = 0.0
+
+    def __enter__(self):
+        with self.cv:
+            while self.active >= self.limit:
+                self.cv.wait()
+            self.active += 1
+
+    def __exit__(self, *exc):
+        with self.cv:
+            self.active -= 1
+            self.cv.notify_all()
+
+    def penalize(self):
+        with self.cv:
+            now = time.time()
+            if self.limit > 1 and now - self.last_cut > 5:
+                self.limit -= 1
+                self.cuts += 1
+                self.last_cut = now
+
+
+def generate_one(client, model: str, prompt: str, aspect: str, refs, throttle: Throttle):
     """워커 스레드에서 실행 (Streamlit 호출 금지). (bytes|None, error|None) 반환."""
     from google.genai import types
+    contents = [prompt] + [types.Part.from_bytes(data=r["data"], mime_type=r["mime"]) for r in refs]
     last = ""
     for attempt in range(5):
         try:
-            res = client.models.generate_content(
-                model=model,
-                contents=[prompt],
-                config=types.GenerateContentConfig(
-                    response_modalities=["IMAGE"],
-                    image_config=types.ImageConfig(aspect_ratio=aspect),
-                ),
-            )
+            with throttle:  # 대기(백오프) 중에는 슬롯을 점유하지 않음
+                res = client.models.generate_content(
+                    model=model,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        response_modalities=["IMAGE"],
+                        image_config=types.ImageConfig(aspect_ratio=aspect),
+                    ),
+                )
             for cand in (res.candidates or []):
                 for part in (getattr(cand.content, "parts", None) or []):
                     inline = getattr(part, "inline_data", None)
                     if inline and inline.data:
                         return inline.data, None
-            reason = ""
-            if res.candidates:
-                reason = str(getattr(res.candidates[0], "finish_reason", ""))
+            reason = str(getattr(res.candidates[0], "finish_reason", "")) if res.candidates else ""
             last = f"이미지가 반환되지 않음 (안전 필터 등) {reason}".strip()
             if attempt >= 1:  # 필터 거절은 1회만 재시도
                 break
         except Exception as e:  # noqa: BLE001
             last = str(e)
-            if not any(h.lower() in last.lower() for h in PRIVATE_ERR_HINTS):
+            if "429" in last or "RESOURCE_EXHAUSTED" in last:
+                throttle.penalize()
+            if not any(h.lower() in last.lower() for h in RETRIABLE_HINTS):
                 break  # 재시도해도 소용없는 오류(키 오류 등)
         time.sleep(min(30, 2 ** attempt) + random.random())  # 지수 백오프
     return None, last[:300]
 
 
-def run_parallel(client, model, aspect, targets, workers, on_done):
-    """targets: [scene dict]. 완료되는 순서대로 on_done(scene_idx, bytes, err) 호출 (메인 스레드)."""
+def run_parallel(client, model, aspect, targets, workers, on_done, refs, throttle):
+    """완료되는 순서대로 on_done(scene_idx, bytes, err) 호출 (메인 스레드)."""
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = {ex.submit(generate_one, client, model, s.get("gen_prompt") or s["prompt"], aspect): s["idx"] for s in targets}
+        futs = {ex.submit(generate_one, client, model, s["gen_prompt"], aspect, refs, throttle): s["idx"]
+                for s in targets}
         for f in as_completed(futs):
             idx = futs[f]
             try:
@@ -243,7 +372,25 @@ def run_parallel(client, model, aspect, targets, workers, on_done):
             on_done(idx, img, err)
 
 
-# ───────────────────────── 화면 보조 ─────────────────────────
+# ───────────────────────── 파일 입출력 (자동 저장/프리셋) ─────────────────────────
+def load_custom_presets() -> dict:
+    try:
+        return json.loads(PRESETS_FILE.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def save_custom_presets(d: dict):
+    PRESETS_FILE.write_text(json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def list_projects():
+    if not PROJECTS_DIR.exists():
+        return []
+    return sorted(p.name for p in PROJECTS_DIR.iterdir() if (p / "project.json").exists())
+
+
+# ───────────────────────── 결과 보조 ─────────────────────────
 def render_grid(container, scenes, cols=4):
     with container.container():
         for r in range(0, len(scenes), cols):
@@ -267,7 +414,7 @@ def make_zip(scenes) -> bytes:
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for s in scenes:
             if s.get("image"):
-                z.writestr(f'{s["idx"]:03d}_{fmt_time(s["start"]).replace(":", "m")}s.png', s["image"])
+                z.writestr(f'{s["idx"]:03d}_{fmt_time(s["start"]).replace(":", "m")}s.{img_ext(s["image"])}', s["image"])
     return buf.getvalue()
 
 
@@ -277,55 +424,264 @@ def make_csv(scenes) -> bytes:
     w.writerow(["번호", "시작", "끝", "대본", "프롬프트", "상태"])
     for s in scenes:
         status = "성공" if s.get("image") else ("실패: " + s["error"] if s.get("error") else "미생성")
-        w.writerow([s["idx"], fmt_time(s["start"]), fmt_time(s["end"]), s["text"], s.get("gen_prompt") or s.get("prompt", ""), status])
+        w.writerow([s["idx"], fmt_time(s["start"]), fmt_time(s["end"]), s["text"],
+                    s.get("gen_prompt") or s.get("prompt", ""), status])
     return ("﻿" + buf.getvalue()).encode("utf-8")
+
+
+def make_srt(scenes) -> bytes:
+    out = []
+    for s in scenes:
+        out.append(f'{s["idx"]}\n{srt_time(s["start"])} --> {srt_time(s["end"])}\n{s["text"]}\n')
+    return "\n".join(out).encode("utf-8")
 
 
 # ───────────────────────── 앱 ─────────────────────────
 st.set_page_config(page_title="대본 → 이미지 생성기", page_icon="🖼️", layout="wide")
 ss = st.session_state
-ss.setdefault("analysis", None)
-ss.setdefault("scenes", [])
-ss.setdefault("total_sec", 0.0)
 
+
+def _default_api_key() -> str:
+    key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or ""
+    if not key:
+        try:
+            key = st.secrets.get("GEMINI_API_KEY", "")
+        except Exception:  # noqa: BLE001
+            key = ""
+    return key
+
+
+DEFAULTS = {"script": "", "format_prompt": DEFAULT_FORMAT_PROMPT, "style": JIGU_STYLE,
+            "preset": "지구박물관 (기본)", "model_label": "나노바나나 프로", "text_model": DEFAULT_TEXT_MODEL,
+            "aspect": "16:9", "sec": 5, "cps": 7.0, "lang": "언어 없음", "workers": 4,
+            "api_key": _default_api_key(), "project_name": "my_project", "autosave": True,
+            "force_all": False, "test_no": 1, "edit_k": 1, "new_preset_name": "", "load_choice": "(선택)",
+            "analysis": None, "analysis_hash": None, "scenes": [], "total_sec": 0.0, "refs": [], "editor_ver": 0,
+            **{f"mid_{k}": v for k, v in IMAGE_MODELS.items()}}
+for _k, _v in DEFAULTS.items():
+    ss.setdefault(_k, _v)
+
+
+def bump():
+    """data_editor 상태를 초기화해 프로그램으로 바꾼 값이 표에 반영되게 한다."""
+    ss.editor_ver += 1
+
+
+def project_dir() -> Path:
+    return PROJECTS_DIR / safe_name(ss.project_name)
+
+
+def save_project(full: bool = False):
+    """프로젝트 JSON 저장. full=True면 이미지/참조 이미지 파일도 전부 다시 쓴다."""
+    try:
+        d = project_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        data = {"version": 1, "inputs": {k: ss.get(k) for k in INPUT_KEYS}, "analysis": ss.analysis,
+                "analysis_hash": ss.analysis_hash, "total_sec": ss.total_sec,
+                "scenes": [{k: v for k, v in s.items() if k != "image"} for s in ss.scenes]}
+        (d / "project.json").write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        if full:
+            (d / "images").mkdir(exist_ok=True)
+            keep = set()
+            for s in ss.scenes:
+                if s.get("image"):
+                    p = d / "images" / f'{s["idx"]:03d}.{img_ext(s["image"])}'
+                    p.write_bytes(s["image"])
+                    keep.add(p.name)
+            for f in (d / "images").iterdir():
+                if f.name not in keep:
+                    f.unlink()
+            (d / "refs").mkdir(exist_ok=True)
+            for f in (d / "refs").iterdir():
+                f.unlink()
+            for i, r in enumerate(ss.refs, 1):
+                (d / "refs" / f'{i}_{safe_name(r["name"])}.{r["mime"].split("/")[-1]}').write_bytes(r["data"])
+    except Exception as e:  # noqa: BLE001
+        st.toast(f"자동 저장 실패: {e}")
+
+
+def save_image(s):
+    try:
+        d = project_dir() / "images"
+        d.mkdir(parents=True, exist_ok=True)
+        for old in d.glob(f'{s["idx"]:03d}.*'):
+            old.unlink()
+        (d / f'{s["idx"]:03d}.{img_ext(s["image"])}').write_bytes(s["image"])
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def load_project():
+    choice = ss.get("load_choice")
+    if not choice or choice == "(선택)":
+        return
+    d = PROJECTS_DIR / choice
+    try:
+        data = json.loads((d / "project.json").read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001
+        st.toast(f"불러오기 실패: {e}")
+        return
+    options = list(BUILTIN_PRESETS) + list(load_custom_presets()) + [CUSTOM_LABEL]
+    for k, v in (data.get("inputs") or {}).items():
+        if v is None or k not in INPUT_KEYS:
+            continue
+        if k == "sec" and v not in SCENE_SECONDS:
+            continue
+        if k == "lang" and v not in IMAGE_LANGS:
+            continue
+        if k == "model_label" and v not in IMAGE_MODELS:
+            continue
+        if k == "preset" and v not in options:
+            v = CUSTOM_LABEL
+        ss[k] = v
+    ss.project_name = choice
+    ss.analysis, ss.analysis_hash = data.get("analysis"), data.get("analysis_hash")
+    ss.total_sec = data.get("total_sec", 0.0)
+    scenes = data.get("scenes", [])
+    for s in scenes:
+        for p in (d / "images").glob(f'{s["idx"]:03d}.*'):
+            s["image"] = p.read_bytes()
+            break
+    ss.scenes = scenes
+    ss.refs = []
+    if (d / "refs").exists():
+        for p in sorted((d / "refs").iterdir())[:MAX_REFS]:
+            ss.refs.append({"name": p.name, "data": p.read_bytes(), "mime": f"image/{p.suffix[1:] or 'png'}"})
+    bump()
+    st.toast(f"'{choice}' 불러옴 (장면 {len(scenes)}개)")
+
+
+def on_preset_change():
+    name = ss.preset
+    if name == CUSTOM_LABEL:
+        return
+    allp = {**BUILTIN_PRESETS, **load_custom_presets()}
+    if name in allp:
+        ss.style = allp[name]
+
+
+def save_preset():
+    nm = (ss.new_preset_name or "").strip()
+    if not nm or not ss.style.strip():
+        st.toast("프리셋 이름과 스타일 내용을 입력하세요.")
+        return
+    if nm in BUILTIN_PRESETS:
+        st.toast("기본 프리셋과 같은 이름은 쓸 수 없습니다.")
+        return
+    cp = load_custom_presets()
+    cp[nm] = ss.style
+    save_custom_presets(cp)
+    ss.preset, ss.new_preset_name = nm, ""
+    st.toast(f"프리셋 '{nm}' 저장됨")
+
+
+def delete_preset():
+    cp = load_custom_presets()
+    if ss.preset in cp:
+        del cp[ss.preset]
+        save_custom_presets(cp)
+        st.toast(f"프리셋 '{ss.preset}' 삭제됨")
+        ss.preset = CUSTOM_LABEL
+
+
+# ───────────────────────── 사이드바 ─────────────────────────
+with st.sidebar:
+    st.header("⚙️ 설정")
+    st.text_input("Gemini API 키", type="password", key="api_key",
+                  help="저장되지 않습니다. 환경변수 GEMINI_API_KEY 또는 Streamlit secrets에 두면 자동 입력됩니다.")
+    st.selectbox("이미지 모델", list(IMAGE_MODELS), key="model_label")
+    st.text_input("이미지 모델 ID", key=f"mid_{ss.model_label}", help="모델 ID가 바뀌면 여기서 수정하세요.")
+    st.text_input("분석·프롬프트화 텍스트 모델", key="text_model")
+    st.selectbox("화면 비율", ASPECT_RATIOS, key="aspect")
+    st.selectbox("장면당 길이 (초 단위 분할)", SCENE_SECONDS, key="sec", format_func=lambda x: f"{x}초",
+                 help="이미지 1장이 커버하는 시간")
+    st.selectbox("이미지 속 글자 언어", list(IMAGE_LANGS), key="lang",
+                 help="기본은 '언어 없음'(글자·자막·로고 없음). 언어를 고르면 간판·비문 같은 장면 속 글자만 "
+                      "해당 언어로 허용하고 자막·로고·말풍선은 계속 금지합니다.")
+    st.number_input("낭독 속도 (글자/초)", 3.0, 15.0, step=0.5, key="cps",
+                    help="공백 제외 글자 수로 영상 길이를 추정합니다.")
+    st.slider("동시 생성 수 (병렬)", 1, 10, key="workers",
+              help="값이 크면 빠르지만 429(속도 제한)가 늘 수 있습니다. 429가 감지되면 자동으로 낮춥니다.")
+
+    st.divider()
+    st.subheader("💾 프로젝트")
+    st.text_input("프로젝트 이름", key="project_name", help="projects/<이름>/ 폴더에 저장됩니다.")
+    st.checkbox("자동 저장", key="autosave", help="단계가 끝날 때마다, 이미지가 만들어질 때마다 저장합니다.")
+    c_s, c_l = st.columns(2)
+    if c_s.button("지금 저장", width="stretch"):
+        save_project(full=True)
+        st.toast("저장했습니다.")
+    st.selectbox("불러올 프로젝트", ["(선택)"] + list_projects(), key="load_choice")
+    c_l.button("📂 불러오기", width="stretch", on_click=load_project)
+
+api_key = ss.api_key
+model_label, text_model, aspect = ss.model_label, ss.text_model, ss.aspect
+model_id = ss[f"mid_{model_label}"]
+sec_per_scene, cps, image_lang, workers = ss.sec, ss.cps, ss.lang, ss.workers
+
+# ───────────────────────── 메인 입력 ─────────────────────────
 st.title("🖼️ 대본 → 이미지 자동 생성기")
 st.caption("대본분석 → 초 단위 분할 → 이미지 프롬프트화 → 이미지 병렬 생성 (Gemini API)")
 
-with st.sidebar:
-    st.header("⚙️ 설정")
-    api_key = st.text_input("Gemini API 키", type="password", help="저장되지 않으며 이 세션에서만 사용됩니다.")
-    model_label = st.selectbox("이미지 모델", list(IMAGE_MODELS))
-    model_id = st.text_input("이미지 모델 ID", value=IMAGE_MODELS[model_label], key=f"mid_{model_label}",
-                             help="모델 ID가 바뀌면 여기서 수정하세요.")
-    text_model = st.text_input("분석·프롬프트화 텍스트 모델", value=DEFAULT_TEXT_MODEL)
-    aspect = st.selectbox("화면 비율", ASPECT_RATIOS)
-    sec_per_scene = st.selectbox("장면당 길이 (초 단위 분할)", SCENE_SECONDS, index=2,
-                                 format_func=lambda x: f"{x}초", help="이미지 1장이 커버하는 시간")
-    image_lang = st.selectbox("이미지 속 글자 언어", list(IMAGE_LANGS), index=3,
-                              help="기본은 '언어 없음'(글자·자막·로고 없음). 언어를 고르면 간판·비문 같은 장면 속 글자만 해당 언어로 허용하고 자막·로고·말풍선은 계속 금지합니다.")
-    cps = st.number_input("낭독 속도 (글자/초)", 3.0, 15.0, 7.0, 0.5,
-                          help="공백 제외 글자 수로 영상 길이를 추정합니다.")
-    workers = st.slider("동시 생성 수 (병렬)", 1, 10, 4, 1,
-                        help="값이 크면 빠르지만 429(속도 제한)가 늘 수 있습니다.")
-
 col_a, col_b = st.columns([3, 2])
 with col_a:
-    script = st.text_area("📜 대본", height=300, placeholder="여기에 대본을 붙여 넣으세요.")
+    txt_file = st.file_uploader("대본 .txt 불러오기 (선택)", type=["txt"])
+    if txt_file is not None and ss.get("_txt_name") != (txt_file.name, txt_file.size):
+        ss._txt_name = (txt_file.name, txt_file.size)
+        try:
+            ss.script = txt_file.getvalue().decode("utf-8-sig")
+        except UnicodeDecodeError:
+            ss.script = txt_file.getvalue().decode("cp949", errors="replace")
+    st.text_area("📜 대본", height=280, key="script", placeholder="여기에 대본을 붙여 넣으세요.")
+    script = ss.script
+    chars, est_sec, est_n = estimate(script, sec_per_scene, cps)
+    if chars:
+        est_min = est_n * SEC_PER_IMAGE_GUESS / max(1, workers) / 60
+        st.caption(f"대본 {chars:,}자 · 추정 길이 {fmt_time(est_sec)} · 장면 {est_n}개 → 이미지 {est_n}장, "
+                   f"텍스트 호출 약 {math.ceil(est_n / 15) + 1}회 · 이미지 생성 예상 약 {est_min:.1f}분 "
+                   f"(장당 {SEC_PER_IMAGE_GUESS}초 가정, 실제와 다를 수 있음)")
 with col_b:
-    format_prompt = st.text_area("🧩 형식 이미지 프롬프트 (장면 묘사가 따를 규칙)", value=DEFAULT_FORMAT_PROMPT, height=170)
-    preset = st.selectbox("🎨 스타일 가이드", list(STYLE_PRESETS))
-    if preset == "직접 입력":
-        style = st.text_area("스타일 가이드 직접 입력", height=120,
-                             placeholder="예: A watercolor illustration ... The scene depicts")
-    else:
-        style = st.text_area("스타일 가이드 (수정 가능)", value=STYLE_PRESETS[preset], height=170, key=f"style_{preset}")
+    st.text_area("🧩 형식 이미지 프롬프트 (장면 묘사가 따를 규칙)", height=150, key="format_prompt")
+    format_prompt = ss.format_prompt
+
+    options = list(BUILTIN_PRESETS) + list(load_custom_presets()) + [CUSTOM_LABEL]
+    if ss.preset not in options:
+        ss.preset = CUSTOM_LABEL
+    st.selectbox("🎨 스타일 가이드", options, key="preset", on_change=on_preset_change)
+    st.text_area("스타일 가이드 내용 (수정 가능)", height=140, key="style",
+                 placeholder="예: A watercolor illustration ... The scene depicts")
+    style = ss.style
+    p1, p2, p3 = st.columns([3, 1, 1])
+    p1.text_input("내 프리셋으로 저장할 이름", key="new_preset_name", label_visibility="collapsed",
+                  placeholder="프리셋 이름 입력 후 저장")
+    p2.button("💾 저장", on_click=save_preset, width="stretch")
+    p3.button("🗑️ 삭제", on_click=delete_preset, width="stretch", disabled=ss.preset not in load_custom_presets())
+
+    ref_files = st.file_uploader(f"🧷 레퍼런스 이미지 (최대 {MAX_REFS}장, 인물·소품 일관성용)",
+                                 type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True)
+    if ref_files:
+        ss.refs = [{"name": f.name, "data": f.getvalue(), "mime": f.type or "image/png"} for f in ref_files[:MAX_REFS]]
+    if ss.refs:
+        rc = st.columns(len(ss.refs))
+        for c, r in zip(rc, ss.refs):
+            c.image(r["data"], caption=r["name"][:12], width="stretch")
+        if st.button("레퍼런스 비우기"):
+            ss.refs = []
+            st.rerun()
 
 b1, b2, b3, b4, b5 = st.columns(5)
 run_all = b1.button("🚀 전체 자동 실행", type="primary", width="stretch")
 run1 = b2.button("1 대본 분석", width="stretch")
 run2 = b3.button("2 초 단위 분할", width="stretch")
 run3 = b4.button("3 프롬프트화", width="stretch")
-run4 = b5.button("4 이미지 생성", width="stretch")
+run4 = b5.button("4 이미지 생성(이어서)", width="stretch",
+                 help="이미 만든 이미지는 건너뛰고 없는 장면만 생성합니다.")
+t1, t2, t3, t4 = st.columns([1, 1, 1, 1])
+ss.test_no = min(max(1, int(ss.test_no)), max(1, len(ss.scenes)))
+test_no = t1.number_input("테스트 장면 번호", 1, max(1, len(ss.scenes)), key="test_no")
+run_test = t2.button("🧪 이 장면만 1장 테스트", width="stretch")
+run_fail = t3.button("♻️ 실패 장면 전부 재생성", width="stretch")
+t4.checkbox("완료된 이미지도 모두 다시 생성", key="force_all")
 
 
 def need_key() -> bool:
@@ -342,15 +698,46 @@ def need_script() -> bool:
     return True
 
 
-def do_analyze():
+def autosave(full=False):
+    if ss.autosave:
+        save_project(full=full)
+
+
+def do_analyze(force=True):
+    h = script_hash(script)
+    if not force and ss.analysis and ss.analysis_hash == h:
+        return  # 같은 대본이면 분석 결과 재사용
     with st.spinner("1/4 대본 분석 중…"):
         ss.analysis = analyze_script(get_client(api_key), text_model, script)
-    ss.scenes = []  # 이후 단계 초기화
+    ss.analysis_hash = h
+    autosave()
 
 
 def do_split():
     scenes, total = split_script(script, sec_per_scene, cps)
     ss.scenes, ss.total_sec = scenes, total
+    bump()
+    autosave(full=True)
+
+
+def rewrite_prompts(only_ids=None):
+    """only_ids=None이면 전체, 아니면 해당 번호 장면의 프롬프트만 다시 만든다."""
+    targets = [s for s in ss.scenes if only_ids is None or s["idx"] in only_ids]
+    if not targets:
+        return
+    bar = st.progress(0.0, text="이미지 프롬프트 생성 중…")
+    descs = build_scene_descriptions(
+        get_client(api_key), text_model, ss.analysis or {}, targets, format_prompt, image_lang,
+        progress_cb=lambda d, t: bar.progress(d / t, text=f"프롬프트 {d}/{t}"))
+    for s in targets:
+        desc = descs.get(s["idx"]) or s["text"]  # 누락 시 대본 원문으로 대체
+        s["desc"] = desc
+        s["prompt"] = compose_prompt(style, desc)
+        for k in ("image", "error", "gen_prompt"):
+            s.pop(k, None)
+    bar.empty()
+    bump()
+    autosave(full=True)
 
 
 def do_prompts():
@@ -358,29 +745,23 @@ def do_prompts():
         do_split()
     if not ss.analysis:
         do_analyze()
-    bar = st.progress(0.0, text="3/4 이미지 프롬프트 생성 중…")
-    descs = build_scene_descriptions(
-        get_client(api_key), text_model, ss.analysis, ss.scenes, format_prompt, image_lang,
-        progress_cb=lambda d, t: bar.progress(d / t, text=f"3/4 프롬프트 {d}/{t}"))
-    for s in ss.scenes:
-        desc = descs.get(s["idx"]) or s["text"]  # 누락 시 대본 원문으로 대체
-        s["desc"] = desc
-        s["prompt"] = compose_prompt(style, desc)
-        s.pop("image", None)
-        s.pop("error", None)
-    bar.empty()
+    rewrite_prompts(None)
 
 
-def do_images(only=None):
-    targets = [s for s in ss.scenes if s.get("prompt") and (only is None or s["idx"] in only)]
+def do_images(only=None, force=False):
+    targets = [s for s in ss.scenes if s.get("prompt")
+               and (s["idx"] in only if only is not None else (force or not s.get("image")))]
     if not targets:
-        st.warning("생성할 장면(프롬프트)이 없습니다. 3단계를 먼저 실행하세요.")
+        st.info("생성할 장면이 없습니다. (이미 모두 생성됐거나 프롬프트가 없습니다. 3단계를 먼저 실행하세요.)")
         return
     by_idx = {s["idx"]: s for s in ss.scenes}
     directive = lang_directive(image_lang)
+    ref_hint = (" Match the character design, outfit and key objects of the attached reference image(s) exactly."
+                if ss.refs else "")
     for t in targets:
         t.pop("error", None)
-        t["gen_prompt"] = f'{t["prompt"].strip()} {directive}'
+        t["gen_prompt"] = f'{t["prompt"].strip()} {directive}{ref_hint}'
+    throttle = Throttle(workers)
     holder = st.empty()
     bar = st.progress(0.0, text=f"4/4 이미지 생성 0/{len(targets)} (동시 {workers}개)")
     done = [0]
@@ -389,21 +770,31 @@ def do_images(only=None):
         done[0] += 1
         by_idx[idx]["image"] = img
         by_idx[idx]["error"] = err
-        bar.progress(done[0] / len(targets), text=f"4/4 이미지 생성 {done[0]}/{len(targets)}")
+        if img and ss.autosave:
+            save_image(by_idx[idx])
+        bar.progress(done[0] / len(targets),
+                     text=f"4/4 이미지 생성 {done[0]}/{len(targets)} (현재 동시 {throttle.limit}개)")
         render_grid(holder, ss.scenes)
 
     render_grid(holder, ss.scenes)
-    run_parallel(get_client(api_key), model_id, aspect, targets, workers, on_done)
+    run_parallel(get_client(api_key), model_id, aspect, targets, workers, on_done, ss.refs, throttle)
     bar.empty()
-    fails = sum(1 for t in targets if not by_idx[t["idx"]].get("image"))
-    (st.warning if fails else st.success)(f"완료: 성공 {len(targets) - fails} / 실패 {fails}")
+    fails = [t for t in targets if not by_idx[t["idx"]].get("image")]
+    (st.warning if fails else st.success)(f"완료: 성공 {len(targets) - len(fails)} / 실패 {len(fails)}")
+    if throttle.cuts:
+        st.warning(f"속도 제한(429)이 감지되어 동시 생성 수를 {workers}→{throttle.limit}개로 자동 낮췄습니다. "
+                   "계속 실패하면 사이드바에서 동시 생성 수를 낮춰 보세요.")
+    elif any("429" in (t.get("error") or "") or "RESOURCE_EXHAUSTED" in (t.get("error") or "") for t in fails):
+        st.warning("속도 제한(429)으로 실패했습니다. 동시 생성 수를 낮추고 '실패 장면 전부 재생성'을 눌러 보세요.")
+    st.toast("이미지 생성 완료" if not fails else f"이미지 생성 완료 (실패 {len(fails)}장)")
+    autosave()
 
 
 try:
     if run_all and need_key() and need_script():
-        do_analyze()
+        do_analyze(force=False)
         do_split()
-        do_prompts()
+        rewrite_prompts(None)
         do_images()
     elif run1 and need_key() and need_script():
         do_analyze()
@@ -412,7 +803,15 @@ try:
     elif run3 and need_key() and need_script():
         do_prompts()
     elif run4 and need_key():
-        do_images()
+        do_images(force=ss.force_all)
+    elif run_test and need_key():
+        do_images(only={int(test_no)})
+    elif run_fail and need_key():
+        bad = {s["idx"] for s in ss.scenes if s.get("prompt") and not s.get("image")}
+        if bad:
+            do_images(only=bad)
+        else:
+            st.info("실패하거나 미생성인 장면이 없습니다.")
 except Exception as e:  # noqa: BLE001
     st.error(f"오류: {e}")
 
@@ -422,14 +821,52 @@ if ss.analysis:
         st.json(ss.analysis)
 
 if ss.scenes:
-    st.subheader(f"🎬 장면 {len(ss.scenes)}개 · 추정 길이 {fmt_time(ss.total_sec)} · 장면당 {sec_per_scene}초")
-    has_prompt = any(s.get("prompt") for s in ss.scenes)
+    n_img = sum(1 for s in ss.scenes if s.get("image"))
+    st.subheader(f"🎬 장면 {len(ss.scenes)}개 · 이미지 {n_img}장 완료 · 추정 길이 {fmt_time(ss.total_sec)}")
     rows = [{"번호": s["idx"], "시간": f'{fmt_time(s["start"])}~{fmt_time(s["end"])}',
-             "대본": s["text"], "프롬프트(수정 가능)": s.get("prompt", "")} for s in ss.scenes]
-    edited = st.data_editor(rows, width="stretch", hide_index=True, disabled=["번호", "시간", "대본"],
-                            key="editor", height=min(500, 60 + 38 * len(rows)))
+             "대본(수정 가능)": s["text"], "프롬프트(수정 가능)": s.get("prompt", "")} for s in ss.scenes]
+    edited = st.data_editor(rows, width="stretch", hide_index=True, disabled=["번호", "시간"],
+                            key=f"editor_{ss.editor_ver}", height=min(500, 60 + 38 * len(rows)))
     for s, row in zip(ss.scenes, edited):  # 편집 내용을 상태에 반영
         s["prompt"] = row["프롬프트(수정 가능)"]
+        s["text"] = row["대본(수정 가능)"]
+
+    with st.expander("✂️ 장면 합치기 / 나누기 · 선택 장면 프롬프트 재작성"):
+        ids = [s["idx"] for s in ss.scenes]
+        e1, e2, e3 = st.columns([1, 2, 2])
+        ss.edit_k = min(max(1, int(ss.edit_k)), len(ids))
+        k = e1.number_input("장면 번호", 1, len(ids), key="edit_k")
+        do_merge = e2.button("➕ 다음 장면과 합치기", width="stretch")
+        do_split_btn = e3.button("✂️ 이 장면 둘로 나누기", width="stretch")
+        pick_rw = st.multiselect("프롬프트를 다시 만들 장면", ids, key="rw_pick")
+        do_rw = st.button("✍️ 선택 장면 프롬프트만 재작성 (이미지는 삭제됨)")
+        try:
+            changed = None
+            if do_merge:
+                new = merge_scenes(ss.scenes, int(k))
+                changed = {new} if new else None
+                if not new:
+                    st.warning("마지막 장면은 합칠 다음 장면이 없습니다.")
+            elif do_split_btn:
+                new = split_scene(ss.scenes, int(k))
+                changed = set(new) if new else None
+                if not new:
+                    st.warning("이 장면은 더 나눌 수 없습니다.")
+            if changed:
+                bump()
+                if api_key:
+                    rewrite_prompts(changed)
+                else:
+                    autosave(full=True)
+                st.rerun()
+            if do_rw and need_key():
+                if pick_rw:
+                    rewrite_prompts(set(pick_rw))
+                    st.rerun()
+                else:
+                    st.warning("장면 번호를 선택하세요.")
+        except Exception as e:  # noqa: BLE001
+            st.error(f"오류: {e}")
 
     if any(s.get("image") or s.get("error") for s in ss.scenes):
         st.subheader("🖼️ 생성 결과")
@@ -442,9 +879,11 @@ if ss.scenes:
                 st.rerun()
             except Exception as e:  # noqa: BLE001
                 st.error(f"오류: {e}")
-        d1, d2 = st.columns(2)
-        if any(s.get("image") for s in ss.scenes):
-            d1.download_button("⬇️ 이미지 ZIP", make_zip(ss.scenes), "images.zip", "application/zip",
-                               width="stretch")
-        d2.download_button("⬇️ 장면/프롬프트 CSV", make_csv(ss.scenes), "scenes.csv", "text/csv",
-                           width="stretch")
+
+    d1, d2, d3 = st.columns(3)
+    if any(s.get("image") for s in ss.scenes):
+        d1.download_button("⬇️ 이미지 ZIP", make_zip(ss.scenes), "images.zip", "application/zip", width="stretch")
+    d2.download_button("⬇️ 장면/프롬프트 CSV", make_csv(ss.scenes), "scenes.csv", "text/csv", width="stretch")
+    d3.download_button("⬇️ 자막/타임코드 SRT", make_srt(ss.scenes), "scenes.srt", "application/x-subrip",
+                       width="stretch")
+    autosave()
