@@ -1,0 +1,3 @@
+file,title,description,tags,category,privacy,publish_at,thumbnail
+videos/ep01.mp4,첫 번째 영상,영상 설명입니다.,"태그1,태그2",22,private,2026-12-01 18:00,videos/ep01.jpg
+videos/ep02.mp4,두 번째 영상,바로 공개 예시,"태그1",22,public,,
