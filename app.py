@@ -61,10 +61,8 @@ DEFAULT_MOTION_RULE = (
 SILENT_DIRECTIVE = ("No dialogue, no speech, no voiceover, no characters talking or lip-syncing, "
                     "no background music, no sound effects. Silent video.")
 NAME_RULES = {
-    "번호_시작시간 (001_00m05s)": "{n:03d}_{t}",
     "scene_번호 (scene_001)": "scene_{n:03d}",
     "번호만 (001)": "{n:03d}",
-    "번호_길이 (001_5s)": "{n:03d}_{d}s",
 }
 
 RETRIABLE_HINTS = ("429", "RESOURCE_EXHAUSTED", "503", "UNAVAILABLE", "500", "INTERNAL", "timed out", "timeout")
@@ -95,19 +93,6 @@ def ensure_silent(text: str, directive: str) -> str:
     if not text or not directive or directive.lower() in text.lower():
         return text
     return f"{text} {directive}"
-
-
-def fmt_time(sec: float) -> str:
-    sec = int(round(sec))
-    return f"{sec // 60:02d}:{sec % 60:02d}"
-
-
-def srt_time(t: float) -> str:
-    ms = int(round(t * 1000))
-    h, ms = divmod(ms, 3600000)
-    m, ms = divmod(ms, 60000)
-    s, ms = divmod(ms, 1000)
-    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
 def img_ext(b: bytes) -> str:
@@ -229,55 +214,6 @@ def split_script(script: str, sec_per_scene: int, chars_per_sec: float):
         scenes.append({"idx": i, "start": t, "end": t + dur, "text": body})
         t += dur
     return scenes, total_sec
-
-
-def renumber(scenes):
-    for i, s in enumerate(scenes, 1):
-        s["idx"] = i
-
-
-def merge_scenes(scenes, k: int):
-    """k번 장면을 다음 장면과 합친다. 합쳐진 장면의 번호를 반환 (불가하면 None)."""
-    pos = next((i for i, s in enumerate(scenes) if s["idx"] == k), None)
-    if pos is None or pos + 1 >= len(scenes):
-        return None
-    a, b = scenes[pos], scenes[pos + 1]
-    scenes[pos:pos + 2] = [{"idx": 0, "start": a["start"], "end": b["end"], "text": f'{a["text"]} {b["text"]}'.strip(),
-                            "desc": a.get("desc", ""), "prompt": a.get("prompt", "")}]
-    renumber(scenes)
-    return pos + 1
-
-
-def split_scene(scenes, k: int):
-    """k번 장면을 문장(또는 단어) 경계에서 둘로 나눈다. 나뉜 두 장면 번호를 반환."""
-    pos = next((i for i, s in enumerate(scenes) if s["idx"] == k), None)
-    if pos is None:
-        return None
-    s = scenes[pos]
-    text = s["text"].strip()
-    parts = _units(text, 10 ** 9)
-    if len(parts) < 2:
-        parts = text.split()
-    if len(parts) >= 2:
-        total = sum(len(p) for p in parts)
-        run, best, cut = 0, None, 1
-        for j in range(1, len(parts)):
-            run += len(parts[j - 1])
-            d = abs(run - total / 2)
-            if best is None or d < best:
-                best, cut = d, j
-        first, second = " ".join(parts[:cut]), " ".join(parts[cut:])
-    elif len(text) >= 2:
-        first, second = text[:len(text) // 2], text[len(text) // 2:]
-    else:
-        return None
-    ratio = len(first) / max(1, len(first) + len(second))
-    mid = s["start"] + (s["end"] - s["start"]) * ratio
-    base = {"desc": s.get("desc", ""), "prompt": s.get("prompt", "")}
-    scenes[pos:pos + 1] = [{"idx": 0, "start": s["start"], "end": mid, "text": first, **base},
-                           {"idx": 0, "start": mid, "end": s["end"], "text": second, **base}]
-    renumber(scenes)
-    return pos + 1, pos + 2
 
 
 # ───────────────────────── 3단계: 이미지 프롬프트화 ─────────────────────────
@@ -524,6 +460,9 @@ def render_scene_row(slot, sc, interactive: bool = False, busy: bool = False):
     script_html = html.escape(sc["text"]).replace("\n", "<br>")
     prompt_html = (f'<div class="lbl">IMAGE PROMPT</div><div class="prompt-box">'
                    f'{html.escape(sc.get("prompt", "")).replace(chr(10), "<br>")}</div>') if sc.get("prompt") else ""
+    motion_html = (f'<div class="lbl">ANIMATION PROMPT</div><div class="prompt-box">'
+                   f'{html.escape(ensure_silent(sc.get("motion", ""), st_.get("silent_rule", ""))).replace(chr(10), "<br>")}'
+                   f'</div>') if sc.get("motion") else ""
     with slot.container(border=True):
         left, right = st.columns([2, 3] if portrait else [5, 4], vertical_alignment="center")
         with left:
@@ -537,9 +476,9 @@ def render_scene_row(slot, sc, interactive: bool = False, busy: bool = False):
         with right:
             st.markdown(
                 f'<div class="scene-head"><span><span class="scene-badge">SCENE {sc["idx"]}</span>'
-                f'<span class="scene-time">{fmt_time(sc["start"])}~{fmt_time(sc["end"])}</span></span>'
+                f'</span>'
                 f'<span class="chip {kind}">{label}</span></div>'
-                f'<div class="lbl">NARRATION SCRIPT</div><div class="scene-script">{script_html}</div>{prompt_html}',
+                f'<div class="lbl">NARRATION SCRIPT</div><div class="scene-script">{script_html}</div>{prompt_html}{motion_html}',
                 unsafe_allow_html=True)
             if interactive and st.button(":material/refresh: 이 장면 다시 만들기", key=f"regen_{sc['idx']}", width="stretch",
                                          disabled=not sc.get("prompt")):
@@ -553,9 +492,8 @@ def render_rows(container, scenes, interactive: bool = False):
 
 
 def scene_filename(sc, rule: str) -> str:
-    pat = NAME_RULES.get(rule, NAME_RULES["번호_시작시간 (001_00m05s)"])
-    return pat.format(n=sc["idx"], t=fmt_time(sc["start"]).replace(":", "m") + "s",
-                      d=max(1, round(sc["end"] - sc["start"])))
+    pat = NAME_RULES.get(rule, next(iter(NAME_RULES.values())))
+    return pat.format(n=sc["idx"])
 
 
 def make_zip(scenes, rule: str = "", with_motion: bool = False, silent: str = "") -> bytes:
@@ -573,24 +511,16 @@ def make_zip(scenes, rule: str = "", with_motion: bool = False, silent: str = ""
 def make_csv(scenes, silent: str = "") -> bytes:
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["번호", "시작", "끝", "길이(초)", "대본", "이미지 프롬프트", "애니메이션 프롬프트", "상태"])
+    w.writerow(["번호", "대본", "이미지 프롬프트", "애니메이션 프롬프트", "상태"])
     for s in scenes:
         status = "성공" if s.get("image") else ("실패: " + s["error"] if s.get("error") else "미생성")
-        w.writerow([s["idx"], fmt_time(s["start"]), fmt_time(s["end"]), max(1, round(s["end"] - s["start"])),
-                    s["text"], s.get("gen_prompt") or s.get("prompt", ""), ensure_silent(s.get("motion", ""), silent), status])
+        w.writerow([s["idx"], s["text"], s.get("gen_prompt") or s.get("prompt", ""),
+                    ensure_silent(s.get("motion", ""), silent), status])
     return ("\ufeff" + buf.getvalue()).encode("utf-8")
 
 
 def make_motion_txt(scenes, silent: str = "") -> bytes:
-    out = [f'#{s["idx"]} ({fmt_time(s["start"])}~{fmt_time(s["end"])}, {max(1, round(s["end"] - s["start"]))}초)\n'
-           f'{ensure_silent(s.get("motion", ""), silent)}\n' for s in scenes]
-    return "\n".join(out).encode("utf-8")
-
-
-def make_srt(scenes) -> bytes:
-    out = []
-    for s in scenes:
-        out.append(f'{s["idx"]}\n{srt_time(s["start"])} --> {srt_time(s["end"])}\n{s["text"]}\n')
+    out = [f'#{s["idx"]}\n{ensure_silent(s.get("motion", ""), silent)}\n' for s in scenes]
     return "\n".join(out).encode("utf-8")
 
 
@@ -722,16 +652,11 @@ DEFAULTS = {"script": "", "format_prompt": DEFAULT_FORMAT_PROMPT, "style": JIGU_
             "preset": "지구박물관 (기본)", "model_label": "나노바나나 프로", "text_model": DEFAULT_TEXT_MODEL,
             "aspect": "16:9", "sec": 5, "cps": 7.0, "lang": "언어 없음", "workers": 4,
             "api_key": _default_api_key(), "project_name": "my_project", "autosave": True,
-            "force_all": False, "motion_rule": DEFAULT_MOTION_RULE, "name_rule": list(NAME_RULES)[0], "zip_motion": False, "silent_rule": SILENT_DIRECTIVE, "motion_auto": True, "test_no": 1, "edit_k": 1, "new_preset_name": "", "load_choice": "(선택)",
-            "log": [], "analysis": None, "analysis_hash": None, "scenes": [], "total_sec": 0.0, "refs": [], "editor_ver": 0,
+            "motion_rule": DEFAULT_MOTION_RULE, "name_rule": list(NAME_RULES)[0], "zip_motion": False, "silent_rule": SILENT_DIRECTIVE, "motion_auto": True, "new_preset_name": "", "load_choice": "(선택)",
+            "log": [], "analysis": None, "analysis_hash": None, "scenes": [], "total_sec": 0.0, "refs": [],
             **{f"mid_{k}": v for k, v in IMAGE_MODELS.items()}}
 for _k, _v in DEFAULTS.items():
     ss.setdefault(_k, _v)
-
-
-def bump():
-    """data_editor 상태를 초기화해 프로그램으로 바꾼 값이 표에 반영되게 한다."""
-    ss.editor_ver += 1
 
 
 def project_dir() -> Path:
@@ -798,6 +723,8 @@ def load_project():
             continue
         if k == "model_label" and v not in IMAGE_MODELS:
             continue
+        if k == "name_rule" and v not in NAME_RULES:
+            continue
         if k == "preset" and v not in options:
             v = CUSTOM_LABEL
         ss[k] = v
@@ -814,7 +741,6 @@ def load_project():
     if (d / "refs").exists():
         for p in sorted((d / "refs").iterdir())[:MAX_REFS]:
             ss.refs.append({"name": p.name, "data": p.read_bytes(), "mime": f"image/{p.suffix[1:] or 'png'}"})
-    bump()
     st.toast(f"'{choice}' 불러옴 (장면 {len(scenes)}개)")
 
 
@@ -859,7 +785,7 @@ with st.sidebar:
     st.selectbox("이미지 모델", list(IMAGE_MODELS), key="model_label")
     st.selectbox("화면 비율", ASPECT_RATIOS, key="aspect")
     st.selectbox("장면당 길이 (초 단위 분할)", SCENE_SECONDS, key="sec", format_func=lambda x: f"{x}초",
-                 help="이미지 1장이 커버하는 시간")
+                 help="대본을 이 길이(초) 분량으로 나눠 장면 하나로 만듭니다. 분량은 '고급 설정'의 낭독 속도로 계산합니다.")
     st.selectbox("이미지 속 글자 언어", list(IMAGE_LANGS), key="lang",
                  help="기본은 '언어 없음'(글자·자막·로고 없음). 언어를 고르면 간판·비문 같은 장면 속 글자만 "
                       "해당 언어로 허용하고 자막·로고·말풍선은 계속 금지합니다.")
@@ -868,13 +794,14 @@ with st.sidebar:
         st.text_input("이미지 모델 ID", key=f"mid_{ss.model_label}", help="모델 ID가 바뀌면 여기서 수정하세요.")
         st.text_input("분석·프롬프트화 텍스트 모델", key="text_model")
         st.number_input("낭독 속도 (글자/초)", 3.0, 15.0, step=0.5, key="cps",
-                        help="공백 제외 글자 수로 영상 길이를 추정합니다.")
+                        help="대본을 '장면당 N초' 분량으로 나눌 때 쓰는 기준입니다. 쓰시는 TTS의 실제 속도에 맞게 조절하세요. "
+                             "(공백 제외 글자 수 ÷ 이 값 = 초)")
         st.slider("동시 생성 수 (병렬)", 1, 10, key="workers",
                   help="값이 크면 빠르지만 429(속도 제한)가 늘 수 있습니다. 429가 감지되면 자동으로 낮춥니다.")
         st.selectbox("ZIP 이미지 파일명 규칙", list(NAME_RULES), key="name_rule")
         st.checkbox("ZIP에 애니메이션 프롬프트(.txt)도 함께 넣기", key="zip_motion",
                     help="이미지와 같은 이름의 .txt 파일로 들어갑니다.")
-        st.checkbox("전체 자동 실행에 애니메이션 프롬프트 포함", key="motion_auto")
+        st.checkbox("일괄 생성에 애니메이션 프롬프트 포함", key="motion_auto")
 
     with st.expander(":material/folder: 프로젝트 저장 / 불러오기"):
         st.text_input("프로젝트 이름", key="project_name", help="projects/<이름>/ 폴더에 저장됩니다.")
@@ -893,7 +820,7 @@ sec_per_scene, cps, image_lang, workers = ss.sec, ss.cps, ss.lang, ss.workers
 
 # ───────────────────────── 메인 입력 ─────────────────────────
 st.title("대본 → 이미지 자동 생성기")
-st.caption("대본을 붙여 넣고 실행 버튼만 누르면 됩니다. 세부 설정은 기본값으로 충분합니다.")
+st.caption("대본을 붙여 넣고 ① 장면 분할 → ② 일괄 생성 순서로 누르세요. 세부 설정은 기본값으로 충분합니다.")
 
 with st.expander(":material/description: .txt 파일로 대본 불러오기"):
     txt_file = st.file_uploader("대본 .txt", type=["txt"], label_visibility="collapsed")
@@ -909,15 +836,16 @@ script = ss.script
 chars, est_sec, est_n = estimate(script, sec_per_scene, cps)
 if chars:
     est_min = est_n * SEC_PER_IMAGE_GUESS / max(1, workers) / 60
-    st.caption(f"대본 {chars:,}자 · 추정 길이 {fmt_time(est_sec)} · 장면 {est_n}개 → 이미지 {est_n}장, "
+    st.caption(f"대본 {chars:,}자 → 장면 약 {est_n}개 · 이미지 {est_n}장, "
                f"텍스트 호출 약 {math.ceil(est_n / 15) + 1}회 · 이미지 생성 예상 약 {est_min:.1f}분 "
                f"(장당 {SEC_PER_IMAGE_GUESS}초 가정, 실제와 다를 수 있음)")
 
-_c1, _c2, _c3 = st.columns([3, 2, 1])
-run_all = _c1.button(":material/play_arrow: 전체 자동 실행", type="primary", width="stretch",
-                     help="분석 → 분할 → 프롬프트 → (움직임 프롬프트) → 이미지 생성을 한 번에 진행합니다.")
-run_preview = _c2.button(":material/content_cut: 장면 분할 미리보기", width="stretch",
-                         help="이미지를 만들기 전에 대본이 어떻게 나뉘는지 먼저 봅니다. (API 호출 없음)")
+_c1, _c2, _c3 = st.columns([2, 3, 1])
+run_split = _c1.button(":material/content_cut: 장면 분할", width="stretch",
+                       help="대본을 장면으로 나눠 1번부터 차례로 보여 줍니다. (API 호출 없음)")
+run_batch = _c2.button(":material/play_arrow: 일괄 생성", type="primary", width="stretch",
+                       help="나뉜 장면을 기반으로 프롬프트 작성 → 이미지 생성까지 한 번에 진행합니다. "
+                            "장면이 아직 안 나뉘어 있으면 먼저 나눕니다. 이미 만든 장면은 건너뜁니다.")
 stop = _c3.button(":material/stop_circle: 중단", key="stop_btn", width="stretch",
                   help="실행 중인 작업을 멈춥니다. 이미 만든 이미지는 남고, 진행 중이던 장이 끝나면 멈춥니다.")
 
@@ -955,23 +883,7 @@ with st.expander(":material/palette: 스타일 · 규칙 설정 (기본값으로
                 st.rerun()
 style, format_prompt, motion_rule = ss.style, ss.format_prompt, ss.motion_rule
 
-with st.expander(":material/science: 단계별 실행 · 테스트 · 재생성"):
-    b1, b2, b3, b4, b5 = st.columns(5)
-    run1 = b1.button("1 분석", width="stretch")
-    run2 = b2.button("2 분할", width="stretch")
-    run3 = b3.button("3 프롬프트화", width="stretch")
-    run4 = b4.button("4 이미지 생성", width="stretch",
-                     help="이어서 생성: 이미 만든 이미지는 건너뛰고 없는 장면만 생성합니다.")
-    run6 = b5.button("5 움직임 프롬프트", width="stretch", help="장면별 이미지-투-비디오용 움직임 지시문을 만듭니다.")
-    t1, t2, t3, t4 = st.columns([1, 1, 1, 1])
-    ss.test_no = min(max(1, int(ss.test_no)), max(1, len(ss.scenes)))
-    test_no = t1.number_input("테스트 장면 번호", 1, max(1, len(ss.scenes)), key="test_no")
-    run_test = t2.button(":material/science: 이 장면만 1장 테스트", width="stretch")
-    run_fail = t3.button(":material/refresh: 실패 장면 전부 재생성", width="stretch")
-    t4.checkbox("완료된 이미지도 모두 다시 생성", key="force_all")
-
-
-_any_run = any([run_all, run_preview, run1, run2, run3, run4, run6, run_test, run_fail])
+_any_run = any([run_split, run_batch])
 if _any_run:
     ss.log = []
 if _any_run or ss.get("log"):
@@ -1025,8 +937,8 @@ def do_split():
     log(f"본문을 분할하는 중… ({_nsp(script):,}자, 장면당 {sec_per_scene}초 목표)")
     scenes, total = split_script(script, sec_per_scene, cps)
     ss.scenes, ss.total_sec = scenes, total
-    log(f"총 {len(scenes)}개 장면으로 분할 완료 (추정 길이 {fmt_time(total)})")
-    bump()
+    ss.split_sig = (script_hash(script), sec_per_scene, cps)
+    log(f"총 {len(scenes)}개 장면으로 분할 완료")
     autosave(full=True)
 
 
@@ -1047,16 +959,7 @@ def rewrite_prompts(only_ids=None):
         for k in ("image", "error", "gen_prompt", "motion"):
             s.pop(k, None)
     bar.empty()
-    bump()
     autosave(full=True)
-
-
-def do_prompts():
-    if not ss.scenes:
-        do_split()
-    if not ss.analysis:
-        do_analyze()
-    rewrite_prompts(None)
 
 
 def do_motion(only_ids=None):
@@ -1074,7 +977,6 @@ def do_motion(only_ids=None):
         base = res.get(s["idx"]) or "Slow gentle zoom in, subtle ambient movement, keep the illustration style unchanged."
         s["motion"] = ensure_silent(base, ss.silent_rule)
     bar.empty()
-    bump()
     autosave()
 
 
@@ -1082,7 +984,7 @@ def do_images(only=None, force=False):
     targets = [s for s in ss.scenes if s.get("prompt")
                and (s["idx"] in only if only is not None else (force or not s.get("image")))]
     if not targets:
-        st.info("생성할 장면이 없습니다. (이미 모두 생성됐거나 프롬프트가 없습니다. 3단계를 먼저 실행하세요.)")
+        st.info("모든 장면의 이미지가 이미 만들어져 있습니다.")
         return
     by_idx = {s["idx"]: s for s in ss.scenes}
     for t in targets:
@@ -1124,129 +1026,51 @@ def do_images(only=None, force=False):
     autosave()
 
 
+def do_batch():
+    """나뉜 장면을 기반으로 프롬프트 → (움직임 프롬프트) → 이미지를 만든다. 이미 된 장면은 건너뛴다."""
+    if not ss.scenes or ss.get("split_sig") != (script_hash(script), sec_per_scene, cps):
+        do_split()  # 아직 안 나눴거나, 대본·분할 설정이 바뀌었으면 먼저 나눈다
+    do_analyze(force=False)
+    psig = (style, format_prompt, image_lang, text_model)
+    if ss.get("prompt_sig") != psig:
+        rewrite_prompts(None)  # 스타일·규칙이 바뀌었으면 전체 프롬프트를 새로 만든다
+    else:
+        missing = {sc["idx"] for sc in ss.scenes if not sc.get("prompt")}
+        if missing:
+            rewrite_prompts(missing)
+    ss.prompt_sig = psig
+    if ss.motion_auto:
+        need = {sc["idx"] for sc in ss.scenes if not sc.get("motion")}
+        if need:
+            do_motion(need)
+    do_images()
+
+
 try:
     if stop:
         st.info("⏹ 작업을 중단했습니다. 이미 만들어진 이미지는 그대로 남아 있어요. "
-                "'4 이미지 생성'(단계별 실행)으로 이어서 만들 수 있습니다.")
-    elif run_all and need_key() and need_script():
-        do_analyze(force=False)
+                "'일괄 생성'을 다시 누르면 남은 장면부터 이어서 만듭니다.")
+    elif run_split and need_script():
         do_split()
-        rewrite_prompts(None)
-        if ss.motion_auto:
-            do_motion()
-        do_images()
-    elif run1 and need_key() and need_script():
-        do_analyze()
-    elif (run2 or run_preview) and need_script():
-        do_split()
-    elif run3 and need_key() and need_script():
-        do_prompts()
-    elif run6 and need_key():
-        do_motion()
-    elif run4 and need_key():
-        do_images(force=ss.force_all)
-    elif run_test and need_key():
-        do_images(only={int(test_no)})
-    elif run_fail and need_key():
-        bad = {s["idx"] for s in ss.scenes if s.get("prompt") and not s.get("image")}
-        if bad:
-            do_images(only=bad)
-        else:
-            st.info("실패하거나 미생성인 장면이 없습니다.")
+    elif run_batch and need_key() and need_script():
+        do_batch()
 except Exception as e:  # noqa: BLE001
     st.error(f"오류: {e}")
 
 # ───────────────────────── 결과 표시 ─────────────────────────
-if ss.analysis:
-    with st.expander(":material/insights: 대본 분석 결과", expanded=False):
-        st.json(ss.analysis)
-
 if ss.scenes:
     n_img = sum(1 for s in ss.scenes if s.get("image"))
-    st.subheader(f"장면 {len(ss.scenes)}개 · 이미지 {n_img}장 완료 · 추정 길이 {fmt_time(ss.total_sec)}")
-    tab_scenes, tab_images, tab_export = st.tabs([":material/view_list: 장면 · 프롬프트", ":material/image: 이미지", ":material/download: 내보내기"])
-
-    with tab_scenes:
-        rows = [{"번호": s["idx"], "시간": f'{fmt_time(s["start"])}~{fmt_time(s["end"])}',
-                 "대본(수정 가능)": s["text"], "프롬프트(수정 가능)": s.get("prompt", ""),
-                 "애니메이션 프롬프트(수정 가능)": s.get("motion", "")} for s in ss.scenes]
-        edited = st.data_editor(rows, width="stretch", hide_index=True, disabled=["번호", "시간"],
-                                key=f"editor_{ss.editor_ver}", height=min(500, 60 + 38 * len(rows)))
-        for s, row in zip(ss.scenes, edited):  # 편집 내용을 상태에 반영
-            s["prompt"] = row["프롬프트(수정 가능)"]
-            s["text"] = row["대본(수정 가능)"]
-            s["motion"] = row["애니메이션 프롬프트(수정 가능)"]
-
-        with st.expander(":material/edit: 장면 합치기 / 나누기 · 선택 장면 프롬프트 재작성"):
-            ids = [s["idx"] for s in ss.scenes]
-            e1, e2, e3 = st.columns([1, 2, 2])
-            ss.edit_k = min(max(1, int(ss.edit_k)), len(ids))
-            k = e1.number_input("장면 번호", 1, len(ids), key="edit_k")
-            do_merge = e2.button(":material/merge: 다음 장면과 합치기", width="stretch")
-            do_split_btn = e3.button(":material/call_split: 이 장면 둘로 나누기", width="stretch")
-            pick_rw = st.multiselect("프롬프트를 다시 만들 장면", ids, key="rw_pick")
-            r1, r2 = st.columns(2)
-            do_rw = r1.button(":material/edit_note: 선택 장면 이미지 프롬프트만 재작성 (이미지는 삭제됨)", width="stretch")
-            do_mo = r2.button(":material/movie: 선택 장면 애니메이션 프롬프트만 재작성", width="stretch")
-            try:
-                changed = None
-                if do_merge:
-                    new = merge_scenes(ss.scenes, int(k))
-                    changed = {new} if new else None
-                    if not new:
-                        st.warning("마지막 장면은 합칠 다음 장면이 없습니다.")
-                elif do_split_btn:
-                    new = split_scene(ss.scenes, int(k))
-                    changed = set(new) if new else None
-                    if not new:
-                        st.warning("이 장면은 더 나눌 수 없습니다.")
-                if changed:
-                    bump()
-                    if api_key:
-                        rewrite_prompts(changed)
-                    else:
-                        autosave(full=True)
-                    st.rerun()
-                if do_mo and need_key():
-                    if pick_rw:
-                        do_motion(set(pick_rw))
-                        st.rerun()
-                    else:
-                        st.warning("장면 번호를 선택하세요.")
-                if do_rw and need_key():
-                    if pick_rw:
-                        rewrite_prompts(set(pick_rw))
-                        st.rerun()
-                    else:
-                        st.warning("장면 번호를 선택하세요.")
-            except Exception as e:  # noqa: BLE001
-                st.error(f"오류: {e}")
-
-    with tab_images:
-        if any(s.get("image") or s.get("error") for s in ss.scenes):
-            render_rows(st.container(), ss.scenes, interactive=True)
-            bad = [s["idx"] for s in ss.scenes if not s.get("image") and s.get("prompt")]
-            pick = st.multiselect("다시 생성할 장면 번호", [s["idx"] for s in ss.scenes], default=bad)
-            if st.button(":material/refresh: 선택 장면 재생성") and need_key():
-                try:
-                    do_images(only=set(pick))
-                    st.rerun()
-                except Exception as e:  # noqa: BLE001
-                    st.error(f"오류: {e}")
-        else:
-            st.info("아직 만들어진 이미지가 없습니다. 위의 ':material/play_arrow: 전체 자동 실행'을 눌러 주세요.")
-
-    with tab_export:
-        d1, d2 = st.columns(2)
-        if any(s.get("image") for s in ss.scenes):
-            d1.download_button(":material/download: 이미지 ZIP", make_zip(ss.scenes, ss.name_rule, ss.zip_motion, ss.silent_rule),
-                               "images.zip", "application/zip", width="stretch")
-        d2.download_button(":material/download: 장면/프롬프트 CSV", make_csv(ss.scenes, ss.silent_rule), "scenes.csv", "text/csv",
-                           width="stretch")
-        d3, d4 = st.columns(2)
-        d3.download_button(":material/download: 자막/타임코드 SRT", make_srt(ss.scenes), "scenes.srt", "application/x-subrip",
-                           width="stretch")
+    st.subheader(f"장면 {len(ss.scenes)}개 · 이미지 {n_img}장 완료")
+    if n_img:  # 내려받을 이미지가 생긴 뒤에만 내보내기 버튼을 보여 준다
+        e1, e2, e3 = st.columns(3)
+        e1.download_button(":material/download: 이미지 ZIP",
+                           make_zip(ss.scenes, ss.name_rule, ss.zip_motion, ss.silent_rule),
+                           "images.zip", "application/zip", width="stretch")
+        e2.download_button(":material/download: 장면/프롬프트 CSV", make_csv(ss.scenes, ss.silent_rule),
+                           "scenes.csv", "text/csv", width="stretch")
         if any(s.get("motion") for s in ss.scenes):
-            d4.download_button(":material/download: 애니메이션 프롬프트 TXT", make_motion_txt(ss.scenes, ss.silent_rule),
-                               "motion_prompts.txt", "text/plain", width="stretch")
+            e3.download_button(":material/download: 애니메이션 프롬프트 TXT",
+                               make_motion_txt(ss.scenes, ss.silent_rule), "motion_prompts.txt", "text/plain",
+                               width="stretch")
+    render_rows(st.container(), ss.scenes, interactive=True)
     autosave()
