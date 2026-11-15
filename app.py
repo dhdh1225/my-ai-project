@@ -23,6 +23,8 @@ IMAGE_MODELS = {
 }
 DEFAULT_TEXT_MODEL = "gemini-2.5-flash"
 ASPECT_RATIOS = ["16:9", "9:16", "1:1", "4:3", "3:4"]
+SCENE_SECONDS = [3, 4, 5, 6, 10, 15, 20]
+IMAGE_LANGS = {"한국어": "Korean (Hangul)", "일본어": "Japanese", "영어": "English", "언어 없음": None}
 
 JIGU_STYLE = (
     "A clean, fully realized 2D vector illustration suitable for an educational "
@@ -37,7 +39,6 @@ STYLE_PRESETS = {"지구박물관 (기본)": JIGU_STYLE, "직접 입력": ""}
 DEFAULT_FORMAT_PROMPT = (
     "각 장면 묘사는 영어 한 문단(2~3문장)으로, 아래 순서를 따른다.\n"
     "[시대/장소] → [중심 인물과 행동] → [주변 소품·건축·배경 요소] → [구도(카메라 거리/각도)]\n"
-    "- 글자·자막·로고·말풍선은 넣지 않는다.\n"
     "- 같은 인물/장소는 전 장면에서 같은 외형·복장으로 일관되게 묘사한다.\n"
     "- 대본에 없는 사실을 지어내지 않는다."
 )
@@ -46,6 +47,16 @@ PRIVATE_ERR_HINTS = ("429", "RESOURCE_EXHAUSTED", "503", "UNAVAILABLE", "500", "
 
 
 # ───────────────────────── 유틸 ─────────────────────────
+def lang_directive(lang: str) -> str:
+    """이미지 속 글자 언어 규칙 (영문 지시문)."""
+    name = IMAGE_LANGS.get(lang)
+    if name is None:
+        return ("The image must contain no text of any kind: no letters, numbers, captions, "
+                "signs with writing, logos, watermarks or speech bubbles.")
+    return (f"Any text that appears in the image (signs, labels, inscriptions, captions) must be "
+            f"written in {name} only. Keep text minimal, short and spelled correctly.")
+
+
 def fmt_time(sec: float) -> str:
     sec = int(round(sec))
     return f"{sec // 60:02d}:{sec % 60:02d}"
@@ -145,7 +156,7 @@ def split_script(script: str, sec_per_scene: int, chars_per_sec: float):
 
 
 # ───────────────────────── 3단계: 이미지 프롬프트화 ─────────────────────────
-def build_scene_descriptions(client, model, analysis, scenes, format_prompt, progress_cb=None, batch=15):
+def build_scene_descriptions(client, model, analysis, scenes, format_prompt, lang, progress_cb=None, batch=15):
     ctx = json.dumps(analysis, ensure_ascii=False)
     result = {}
     for b in range(0, len(scenes), batch):
@@ -161,6 +172,9 @@ def build_scene_descriptions(client, model, analysis, scenes, format_prompt, pro
 
 [형식 규칙]
 {format_prompt}
+
+[이미지 속 글자 규칙]
+{lang_directive(lang)}
 
 [장면 대본]
 {items}"""
@@ -218,7 +232,7 @@ def generate_one(client, model: str, prompt: str, aspect: str):
 def run_parallel(client, model, aspect, targets, workers, on_done):
     """targets: [scene dict]. 완료되는 순서대로 on_done(scene_idx, bytes, err) 호출 (메인 스레드)."""
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = {ex.submit(generate_one, client, model, s["prompt"], aspect): s["idx"] for s in targets}
+        futs = {ex.submit(generate_one, client, model, s.get("gen_prompt") or s["prompt"], aspect): s["idx"] for s in targets}
         for f in as_completed(futs):
             idx = futs[f]
             try:
@@ -262,7 +276,7 @@ def make_csv(scenes) -> bytes:
     w.writerow(["번호", "시작", "끝", "대본", "프롬프트", "상태"])
     for s in scenes:
         status = "성공" if s.get("image") else ("실패: " + s["error"] if s.get("error") else "미생성")
-        w.writerow([s["idx"], fmt_time(s["start"]), fmt_time(s["end"]), s["text"], s.get("prompt", ""), status])
+        w.writerow([s["idx"], fmt_time(s["start"]), fmt_time(s["end"]), s["text"], s.get("gen_prompt") or s.get("prompt", ""), status])
     return ("﻿" + buf.getvalue()).encode("utf-8")
 
 
@@ -284,7 +298,10 @@ with st.sidebar:
                              help="모델 ID가 바뀌면 여기서 수정하세요.")
     text_model = st.text_input("분석·프롬프트화 텍스트 모델", value=DEFAULT_TEXT_MODEL)
     aspect = st.selectbox("화면 비율", ASPECT_RATIOS)
-    sec_per_scene = st.slider("장면당 길이 (초)", 3, 20, 5, 1, help="이미지 1장이 커버하는 시간(3~20초)")
+    sec_per_scene = st.selectbox("장면당 길이 (초 단위 분할)", SCENE_SECONDS, index=2,
+                                 format_func=lambda x: f"{x}초", help="이미지 1장이 커버하는 시간")
+    image_lang = st.selectbox("이미지 속 글자 언어", list(IMAGE_LANGS),
+                              help="이미지에 들어가는 글자의 언어. '언어 없음'은 글자를 넣지 않습니다.")
     cps = st.number_input("낭독 속도 (글자/초)", 3.0, 15.0, 7.0, 0.5,
                           help="공백 제외 글자 수로 영상 길이를 추정합니다.")
     workers = st.slider("동시 생성 수 (병렬)", 1, 10, 4, 1,
@@ -342,7 +359,7 @@ def do_prompts():
         do_analyze()
     bar = st.progress(0.0, text="3/4 이미지 프롬프트 생성 중…")
     descs = build_scene_descriptions(
-        get_client(api_key), text_model, ss.analysis, ss.scenes, format_prompt,
+        get_client(api_key), text_model, ss.analysis, ss.scenes, format_prompt, image_lang,
         progress_cb=lambda d, t: bar.progress(d / t, text=f"3/4 프롬프트 {d}/{t}"))
     for s in ss.scenes:
         desc = descs.get(s["idx"]) or s["text"]  # 누락 시 대본 원문으로 대체
@@ -359,8 +376,10 @@ def do_images(only=None):
         st.warning("생성할 장면(프롬프트)이 없습니다. 3단계를 먼저 실행하세요.")
         return
     by_idx = {s["idx"]: s for s in ss.scenes}
+    directive = lang_directive(image_lang)
     for t in targets:
         t.pop("error", None)
+        t["gen_prompt"] = f'{t["prompt"].strip()} {directive}'
     holder = st.empty()
     bar = st.progress(0.0, text=f"4/4 이미지 생성 0/{len(targets)} (동시 {workers}개)")
     done = [0]
