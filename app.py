@@ -1301,13 +1301,15 @@ def do_split():
     autosave(full=True)
 
 
-def rewrite_prompts(only_ids=None):
-    """only_ids=None이면 전체, 아니면 해당 번호 장면의 프롬프트만 다시 만든다."""
+def rewrite_prompts(only_ids=None, slot=None, quiet=False, save_full=True):
+    """only_ids=None이면 전체, 아니면 해당 번호 장면의 프롬프트만 다시 만든다.
+    slot: 진행 표시를 그릴 자리(st.empty). quiet: 로그를 남기지 않음. save_full: 끝에 이미지 파일까지 전부 저장."""
     targets = [s for s in ss.scenes if only_ids is None or s["idx"] in only_ids]
     if not targets:
         return
-    log(f"장면별 프롬프트 작성 중 ({text_model}) · {len(targets)}장면")
-    bar = st.progress(0.0, text="이미지 프롬프트 생성 중…")
+    if not quiet:
+        log(f"장면별 프롬프트 작성 중 ({text_model}) · {len(targets)}장면")
+    bar = (slot if slot is not None else st).progress(0.0, text="이미지 프롬프트 생성 중…")
     descs = build_scene_descriptions(
         get_client(api_key), text_model, ss.analysis or {}, targets, format_prompt, image_lang,
         progress_cb=lambda d, t: bar.progress(d / t, text=f"프롬프트 {d}/{t}"))
@@ -1319,10 +1321,10 @@ def rewrite_prompts(only_ids=None):
         for k in ("image", "error", "gen_prompt", "motion"):
             s.pop(k, None)
     bar.empty()
-    autosave(full=True)
+    autosave(full=save_full)
 
 
-def do_motion(only_ids=None):
+def do_motion(only_ids=None, slot=None):
     targets = [s for s in ss.scenes if only_ids is None or s["idx"] in only_ids]
     if not targets:
         st.warning("장면이 없습니다. 2단계(분할)를 먼저 실행하세요.")
@@ -1330,7 +1332,7 @@ def do_motion(only_ids=None):
     if not ss.analysis:
         do_analyze(force=False) if script.strip() else None
     log(f"움직임 프롬프트 작성 중 ({text_model}) · {len(targets)}장면")
-    bar = st.progress(0.0, text="애니메이션 프롬프트 생성 중…")
+    bar = (slot if slot is not None else st).progress(0.0, text="애니메이션 프롬프트 생성 중…")
     res = build_motion_prompts(get_client(api_key), text_model, ss.analysis, targets, motion_rule,
                                progress_cb=lambda d, t: bar.progress(d / t, text=f"애니메이션 프롬프트 {d}/{t}"))
     for s in targets:
@@ -1340,59 +1342,78 @@ def do_motion(only_ids=None):
     autosave()
 
 
-def do_images(only=None, force=False):
-    targets = [s for s in ss.scenes if s.get("prompt") and not s.get("skip")
-               and (s["idx"] in only if only is not None else (force or not s.get("image")))]
+def _live_start(total: int) -> dict:
+    """이미지 생성 중 보여 줄 화면(진행바 + 장면 카드 1..N)을 한 번만 만든다."""
+    log(f"이미지 생성 중 ({model_id}) · 대상 {total}장")
+    log(f"병렬 처리 Worker: {workers}개")
+    bar = st.progress(0.0, text=f"이미지 생성 0/{total} (동시 {workers}개)")
+    holder = st.empty()
+    slots = {}
+    with holder.container():  # 장면 1..N 카드를 미리 만들어 두고, 끝나는 카드부터 채운다
+        for sc in ss.scenes:
+            slots[sc["idx"]] = st.empty()
+            render_scene_row(slots[sc["idx"]], sc, busy=True)
+    return {"bar": bar, "holder": holder, "slots": slots, "done": 0, "total": total, "targets": [],
+            "throttle": Throttle(workers), "override_before": dict(_IMAGE_MODEL_OVERRIDE)}
+
+
+def do_images(only, live):
+    """only에 해당하는 장면의 이미지를 병렬로 만든다. 끝나는 대로 live 화면의 카드에 바로 보인다."""
+    targets = [s for s in ss.scenes if s.get("prompt") and not s.get("skip") and s["idx"] in only]
     if not targets:
-        st.info("모든 장면의 이미지가 이미 만들어져 있습니다.")
-        return
+        return []
     by_idx = {s["idx"]: s for s in ss.scenes}
     for t in targets:
         t.pop("error", None)
         t["gen_prompt"] = compose_gen_prompt(t)
-    log(f"이미지 생성 중 ({model_id}) · 대상 {len(targets)}장")
-    log(f"병렬 처리 Worker: {workers}개")
-    throttle = Throttle(workers)
-    bar = st.progress(0.0, text=f"4/4 이미지 생성 0/{len(targets)} (동시 {workers}개)")
-    holder = st.empty()
-    slots = {}
-    with holder.container():  # 장면 1..N 줄을 미리 만들어 두고, 끝나는 줄부터 채운다
-        for sc in ss.scenes:
-            slots[sc["idx"]] = st.empty()
-            render_scene_row(slots[sc["idx"]], sc, busy=True)
-    done = [0]
+    live["targets"].extend(targets)
 
     def on_done(idx, img, err):
-        done[0] += 1
+        live["done"] += 1
         by_idx[idx]["image"] = img
         by_idx[idx]["error"] = err
         if img and ss.autosave:
             save_image(by_idx[idx])
-        bar.progress(done[0] / len(targets),
-                     text=f"4/4 이미지 생성 {done[0]}/{len(targets)} (현재 동시 {throttle.limit}개)")
-        render_scene_row(slots[idx], by_idx[idx], busy=True)  # 이 장면의 카드만 갱신
-    before = dict(_IMAGE_MODEL_OVERRIDE)
-    run_parallel(get_client(api_key), model_id, aspect, targets, workers, on_done, ss.refs, throttle)
+        live["bar"].progress(min(1.0, live["done"] / max(1, live["total"])),
+                             text=f"이미지 생성 {live['done']}/{live['total']} (현재 동시 {live['throttle'].limit}개)")
+        render_scene_row(live["slots"][idx], by_idx[idx], busy=True)  # 이 장면의 카드만 갱신
+    run_parallel(get_client(api_key), model_id, aspect, targets, workers, on_done, ss.refs, live["throttle"])
+    return targets
+
+
+def _live_finish(live: dict):
     for k, v in _IMAGE_MODEL_OVERRIDE.items():
-        if before.get(k) != v:
+        if live["override_before"].get(k) != v:
             log(f"이미지 모델 '{k}'을(를) 쓸 수 없어 '{v}'(으)로 자동 전환했습니다.")
             st.toast(f"이미지 모델 '{k}' → '{v}'(으)로 자동 전환")
-    bar.empty()
-    holder.empty()
-    fails = [t for t in targets if not by_idx[t["idx"]].get("image")]
+    live["bar"].empty()
+    live["holder"].empty()
+    targets = live["targets"]
+    fails = [t for t in targets if not t.get("image")]
     log(f"이미지 생성 완료: 성공 {len(targets) - len(fails)} / 실패 {len(fails)}")
     (st.warning if fails else st.success)(f"완료: 성공 {len(targets) - len(fails)} / 실패 {len(fails)}")
+    throttle = live["throttle"]
     if throttle.cuts:
         st.warning(f"속도 제한(429)이 감지되어 동시 생성 수를 {workers}→{throttle.limit}개로 자동 낮췄습니다. "
                    "계속 실패하면 사이드바에서 동시 생성 수를 낮춰 보세요.")
     elif any("429" in (t.get("error") or "") or "RESOURCE_EXHAUSTED" in (t.get("error") or "") for t in fails):
         st.warning("속도 제한(429)으로 실패했습니다. 동시 생성 수를 낮추고 '일괄 생성'을 다시 눌러 보세요.")
     st.toast("이미지 생성 완료" if not fails else f"이미지 생성 완료 (실패 {len(fails)}장)")
-    autosave()
+    autosave(full=True)  # 번호·이미지 파일을 한 번에 정리
+
+
+def _chunks(ids, first=6, size=15):
+    """첫 묶음은 작게(빨리 첫 이미지를 보이게), 이후는 프롬프트 한 번 호출 분량(15장면)씩."""
+    if not ids:
+        return []
+    out, rest = [ids[:first]], ids[first:]
+    out += [rest[i:i + size] for i in range(0, len(rest), size)]
+    return out
 
 
 def do_batch():
-    """나뉜 장면을 기반으로 프롬프트 → (움직임 프롬프트) → 이미지를 만든다. 이미 된 장면은 건너뛴다."""
+    """나뉜 장면을 기반으로 프롬프트 → 이미지를 만든다. 프롬프트가 만들어지는 대로 그 장면의 이미지를 바로 생성해서
+    첫 이미지를 빨리 볼 수 있다. 움직임 프롬프트는 이미지를 다 만든 뒤에 만든다. 이미 된 장면은 건너뛴다."""
     if not ss.scenes or ss.get("split_sig") != (script_hash(script), sec_per_scene, cps):
         do_split()  # 아직 안 나눴거나, 대본·분할 설정이 바뀌었으면 먼저 나눈다
     do_analyze(force=False)
@@ -1400,13 +1421,23 @@ def do_batch():
     # 프롬프트가 없거나, 지금 스타일·규칙과 다르게 만들어진 장면만 새로 만든다. (개별 생성한 장면은 그대로 둔다)
     stale = {sc["idx"] for sc in ss.scenes
              if not sc.get("skip") and (not sc.get("prompt") or sc.get("psig") not in (None, psig))}
-    if stale:
-        rewrite_prompts(stale)
+    ids = [sc["idx"] for sc in ss.scenes if not sc.get("skip") and (sc["idx"] in stale or not sc.get("image"))]
+    if ids:
+        status = st.empty()  # 프롬프트 작성 진행 표시 자리 (장면 카드 위쪽)
+        live = _live_start(len(ids))
+        for chunk in _chunks(ids):
+            need = set(chunk) & stale
+            if need:
+                rewrite_prompts(need, slot=status, quiet=True, save_full=False)
+            do_images(set(chunk), live)
+        status.empty()
+        _live_finish(live)
     if ss.motion_auto:
         need = {sc["idx"] for sc in ss.scenes if not sc.get("motion") and not sc.get("skip")}
         if need:
             do_motion(need)
-    do_images()
+    if not ids:
+        st.info("모든 장면의 이미지가 이미 만들어져 있습니다.")
 
 
 try:
