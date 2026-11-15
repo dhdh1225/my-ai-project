@@ -27,7 +27,7 @@ IMAGE_MODELS = {
     "나노바나나 프로": "gemini-3-pro-image-preview",
     "나노바나나2": "gemini-3.1-flash-image-preview",
 }
-DEFAULT_TEXT_MODEL = "gemini-2.5-flash"
+DEFAULT_TEXT_MODEL = "gemini-flash-latest"  # 최신 flash로 자동 연결되는 별칭 (모델이 단종돼도 덜 깨짐)
 ASPECT_RATIOS = ["16:9", "9:16", "1:1", "4:3", "3:4"]
 SCENE_SECONDS = [3, 4, 5, 6, 10, 15, 20]
 IMAGE_LANGS = {"한국어": "Korean (Hangul)", "일본어": "Japanese", "영어": "English", "언어 없음": None}
@@ -119,24 +119,92 @@ def get_client(api_key: str):
     return genai.Client(api_key=api_key)
 
 
-def call_text_json(client, model: str, prompt: str):
-    """텍스트 모델을 JSON 모드로 호출하고 파싱한다 (재시도 포함)."""
+def list_models(client):
+    """이 API 키로 쓸 수 있는 모델 목록: [(이름, 지원 기능 목록)]"""
+    out = []
+    for m in client.models.list():
+        name = (getattr(m, "name", "") or "").replace("models/", "")
+        out.append((name, list(getattr(m, "supported_actions", None) or [])))
+    return out
+
+
+def _is_model_missing(e: Exception) -> bool:
+    msg = str(e)
+    return "404" in msg or "NOT_FOUND" in msg or "no longer available" in msg or "is not found" in msg
+
+
+_NON_TEXT = ("image", "tts", "live", "audio", "embedding", "robotics", "computer-use", "vision", "learnlm", "aqa")
+_TEXT_MODEL_OVERRIDE: dict = {}  # {쓸 수 없게 된 모델: 대신 쓰는 모델}
+
+
+def _text_candidates(client, failed: str):
+    """텍스트(JSON) 호출에 쓸 수 있는 대체 모델 후보. flash 계열의 안정판·최신 버전을 먼저."""
+    names = []
+    try:
+        for name, acts in list_models(client):
+            low = name.lower()
+            if "generateContent" in acts and low.startswith("gemini") and not any(x in low for x in _NON_TEXT):
+                names.append(name)
+    except Exception:  # noqa: BLE001 - 목록을 못 가져오면 별칭만 시도
+        pass
+
+    def score(n):
+        low = n.lower()
+        m = re.search(r"gemini-(\d+(?:\.\d+)?)", low)
+        ver = float(m.group(1)) if m else 0.0
+        return ("flash" in low and "lite" not in low, "exp" not in low, "preview" not in low, ver)
+
+    ranked = sorted((n for n in names if n != failed), key=score, reverse=True)
+    cands = ["gemini-flash-latest"] + [n for n in ranked if n != "gemini-flash-latest"]
+    return [c for c in cands if c != failed][:4]
+
+
+def _call_json_once(client, model: str, prompt: str):
     from google.genai import types
+    res = client.models.generate_content(
+        model=model,
+        contents=prompt,
+        config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.4),
+    )
+    txt = (res.text or "").strip()
+    txt = re.sub(r"^```(?:json)?|```$", "", txt, flags=re.M).strip()
+    return json.loads(txt)
+
+
+def call_text_json(client, model: str, prompt: str):
+    """텍스트 모델을 JSON 모드로 호출하고 파싱한다.
+    일시 오류는 재시도하고, 모델이 없어졌다는 오류(404)면 쓸 수 있는 대체 모델로 자동 전환한다."""
+    original = model
+    model = _TEXT_MODEL_OVERRIDE.get(original, original)
     last = None
     for attempt in range(4):
         try:
-            res = client.models.generate_content(
-                model=model,
-                contents=prompt,
-                config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.4),
-            )
-            txt = (res.text or "").strip()
-            txt = re.sub(r"^```(?:json)?|```$", "", txt, flags=re.M).strip()
-            return json.loads(txt)
+            return _call_json_once(client, model, prompt)
         except Exception as e:  # noqa: BLE001
             last = e
+            if _is_model_missing(e):
+                break  # 재시도해도 소용없음 → 대체 모델 탐색
             time.sleep(1.5 * (attempt + 1))
-    raise RuntimeError(f"텍스트 모델 호출 실패: {last}")
+    else:
+        raise RuntimeError(f"텍스트 모델 호출 실패: {last}")
+
+    tried = []
+    for cand in _text_candidates(client, model):
+        try:
+            out = _call_json_once(client, cand, prompt)
+        except Exception as e:  # noqa: BLE001
+            tried.append(f"{cand}: {str(e)[:60]}")
+            continue
+        _TEXT_MODEL_OVERRIDE[original] = cand
+        try:
+            st.toast(f"텍스트 모델 '{original}'을(를) 쓸 수 없어 '{cand}'(으)로 자동 전환했습니다.")
+        except Exception:  # noqa: BLE001
+            pass
+        return out
+    raise RuntimeError(
+        f"텍스트 모델 '{model}'을(를) 쓸 수 없고 대체 모델도 실패했습니다. "
+        f"사이드바 '고급 설정 → 사용 가능한 모델 보기'에서 모델 이름을 확인해 입력하세요. "
+        f"(원본 오류: {str(last)[:120]}; 시도: {'; '.join(tried) or '없음'})")
 
 
 # ───────────────────────── 1단계: 대본 분석 ─────────────────────────
@@ -306,6 +374,44 @@ def build_motion_prompts(client, model, analysis, scenes, motion_rule, progress_
 
 
 # ───────────────────────── 4단계: 이미지 병렬 생성 ─────────────────────────
+_IMAGE_MODEL_OVERRIDE: dict = {}   # {쓸 수 없게 된 이미지 모델: 대신 쓰는 모델}
+_IMG_CANDS: dict = {}              # {원래 모델: 대체 후보 목록}
+_IMG_DEAD: set = set()             # 404가 확인된 모델
+_IMG_LOCK = threading.Lock()
+
+
+def _image_candidates(client, failed: str):
+    """이미지 생성이 가능한 모델 후보. 원래 모델과 같은 계열(pro/flash)을 먼저, 안정판·최신 버전 우선."""
+    fam = "pro" if "pro" in failed.lower() else ("flash" if "flash" in failed.lower() else "")
+    names = [n for n, acts in list_models(client)
+             if "generateContent" in acts and "image" in n.lower() and n != failed]
+
+    def score(n):
+        low = n.lower()
+        m = re.search(r"gemini-(\d+(?:\.\d+)?)", low)
+        ver = float(m.group(1)) if m else 0.0
+        return (bool(fam) and fam in low, "exp" not in low, "preview" not in low, ver)
+
+    return sorted(names, key=score, reverse=True)[:3]
+
+
+def _next_image_model(client, original: str, current: str):
+    """현재 모델이 없다는 오류(404)일 때 다음에 시도할 모델 (없으면 None). 워커 스레드들이 함께 쓴다."""
+    with _IMG_LOCK:
+        _IMG_DEAD.add(current)
+        known = _IMAGE_MODEL_OVERRIDE.get(original)
+        if known and known not in _IMG_DEAD:
+            return known
+        if original not in _IMG_CANDS:
+            try:
+                _IMG_CANDS[original] = _image_candidates(client, original)
+            except Exception:  # noqa: BLE001
+                _IMG_CANDS[original] = []
+        for c in _IMG_CANDS[original]:
+            if c not in _IMG_DEAD:
+                return c
+    return None
+
 class Throttle:
     """동시 실행 수 제한. 429가 감지되면 한도를 자동으로 1씩 낮춘다."""
 
@@ -338,6 +444,8 @@ def generate_one(client, model: str, prompt: str, aspect: str, refs, throttle: T
     """워커 스레드에서 실행 (Streamlit 호출 금지). (bytes|None, error|None) 반환."""
     from google.genai import types
     contents = [prompt] + [types.Part.from_bytes(data=r["data"], mime_type=r["mime"]) for r in refs]
+    original = model
+    model = _IMAGE_MODEL_OVERRIDE.get(original, original)
     last = ""
     for attempt in range(5):
         try:
@@ -354,6 +462,8 @@ def generate_one(client, model: str, prompt: str, aspect: str, refs, throttle: T
                 for part in (getattr(cand.content, "parts", None) or []):
                     inline = getattr(part, "inline_data", None)
                     if inline and inline.data:
+                        if model != original:
+                            _IMAGE_MODEL_OVERRIDE[original] = model  # 대체 모델이 통했으니 이후엔 바로 사용
                         return inline.data, None
             reason = str(getattr(res.candidates[0], "finish_reason", "")) if res.candidates else ""
             last = f"이미지가 반환되지 않음 (안전 필터 등) {reason}".strip()
@@ -361,6 +471,14 @@ def generate_one(client, model: str, prompt: str, aspect: str, refs, throttle: T
                 break
         except Exception as e:  # noqa: BLE001
             last = str(e)
+            if _is_model_missing(e):  # 모델이 없어졌다 → 같은 계열의 대체 모델로 바꿔 다시 시도
+                nxt = _next_image_model(client, original, model)
+                if nxt:
+                    model = nxt
+                    continue
+                last = (f"이미지 모델 '{model}'을(를) 쓸 수 없고 대체 모델도 찾지 못했습니다. "
+                        f"'고급 설정 → 사용 가능한 모델 보기'에서 모델 이름을 확인해 입력하세요. ({last[:120]})")
+                break
             if "429" in last or "RESOURCE_EXHAUSTED" in last:
                 throttle.penalize()
             if not any(h.lower() in last.lower() for h in RETRIABLE_HINTS):
@@ -847,7 +965,24 @@ with st.sidebar:
 
     with st.expander(":material/tune: 고급 설정"):
         st.text_input("이미지 모델 ID", key=f"mid_{ss.model_label}", help="모델 ID가 바뀌면 여기서 수정하세요.")
-        st.text_input("분석·프롬프트화 텍스트 모델", key="text_model")
+        st.text_input("분석·프롬프트화 텍스트 모델", key="text_model",
+                      help="모델이 단종되면 쓸 수 있는 다른 모델로 자동 전환을 시도합니다.")
+        if st.button(":material/list: 사용 가능한 모델 보기", key="list_models", width="stretch",
+                     help="이 API 키로 실제 호출할 수 있는 모델 이름을 조회합니다."):
+            if not ss.api_key:
+                st.error("위에 Gemini API 키를 먼저 입력하세요.")
+            else:
+                try:
+                    _ms = list_models(get_client(ss.api_key))
+                    _gen = [n for n, a in _ms if "generateContent" in a]
+                    _img = [n for n in _gen if "image" in n.lower()]
+                    _txt = [n for n in _gen if n.lower().startswith("gemini") and not any(x in n.lower() for x in _NON_TEXT)]
+                    st.caption("이미지 생성용 (위 '이미지 모델 ID'에 입력)")
+                    st.code("\n".join(_img) or "(없음)", language=None)
+                    st.caption("텍스트용 (위 '텍스트 모델'에 입력)")
+                    st.code("\n".join(_txt) or "(없음)", language=None)
+                except Exception as e:  # noqa: BLE001
+                    st.error(f"모델 목록을 가져오지 못했습니다: {str(e)[:200]}")
         st.number_input("낭독 속도 (글자/초)", 3.0, 15.0, step=0.5, key="cps",
                         help="대본을 '장면당 N초' 분량으로 나눌 때 쓰는 기준입니다. 쓰시는 TTS의 실제 속도에 맞게 조절하세요. "
                              "(공백 제외 글자 수 ÷ 이 값 = 초)")
@@ -1067,7 +1202,12 @@ def do_images(only=None, force=False):
         bar.progress(done[0] / len(targets),
                      text=f"4/4 이미지 생성 {done[0]}/{len(targets)} (현재 동시 {throttle.limit}개)")
         render_scene_row(slots[idx], by_idx[idx], busy=True)  # 이 장면의 카드만 갱신
+    before = dict(_IMAGE_MODEL_OVERRIDE)
     run_parallel(get_client(api_key), model_id, aspect, targets, workers, on_done, ss.refs, throttle)
+    for k, v in _IMAGE_MODEL_OVERRIDE.items():
+        if before.get(k) != v:
+            log(f"이미지 모델 '{k}'을(를) 쓸 수 없어 '{v}'(으)로 자동 전환했습니다.")
+            st.toast(f"이미지 모델 '{k}' → '{v}'(으)로 자동 전환")
     bar.empty()
     holder.empty()
     fails = [t for t in targets if not by_idx[t["idx"]].get("image")]
