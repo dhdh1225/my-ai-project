@@ -77,3 +77,36 @@ streamlit run app.py
 - `APP_PASSWORD`를 설정하지 않으면 주소를 아는 누구나 내 API 키로 이미지를 만들 수 있습니다. 반드시 설정하세요.
 - 배포 서버는 재시작되면 `projects/`, `presets.json`이 사라질 수 있습니다. 생성 후 ZIP/CSV를 바로 내려받으세요.
 - 유튜브 업로더(`main.py`)용 패키지는 `requirements-youtube.txt`로 분리되어 있습니다.
+
+---
+
+# 장면 이미지 → 완성 영상 자동화 (`video_auto/`)
+
+앱에서 만든 프로젝트(이미지·움직임 프롬프트·대본)를 **완성 mp4**로 만듭니다.
+
+1. **내레이션**: Gemini TTS(장면별 낭독, 실제 길이에 맞춰 장면·자막 시간 자동 조정) / 내 음성 파일 / 없음
+2. **장면 클립**: 고른 장면은 **Grok Imagine AI 영상**(이미지+움직임 프롬프트), 나머지는 **무료 줌·패닝 효과**
+   - AI 클립이 장면보다 짧으면 천천히 재생(최대 1.5배) 후 마지막 장면에 줌효과를 이어 채움
+   - AI 생성이 실패한 장면은 자동으로 줌효과로 대체 (영상이 비지 않음)
+3. **합치기**: 클립 연결 + 내레이션 + 배경음악(반복, 볼륨 조절) → `projects/<이름>/output/final.mp4` + 실제 타이밍 `final.srt`
+
+중간 결과(`clips/`, `tts/`)는 캐시되어, 중단 후 다시 실행하면 이미 만든 장면은 다시 요청하지 않습니다(비용 중복 없음).
+
+## 사용법
+앱 맨 아래 **🎬 6. 영상 만들기**에서 버튼으로 실행하거나, PC에서 명령어로 실행합니다.
+
+```bash
+export XAI_API_KEY=...      # xAI 콘솔(console.x.ai)에서 발급
+export GEMINI_API_KEY=...   # TTS용
+python main.py render projects/my_project --test 1        # 1번 장면만 AI 영상 테스트 (먼저 꼭!)
+python main.py render projects/my_project --ai 30%        # 30%만 AI, 나머지 줌효과
+python main.py render projects/my_project --ai none       # 전부 줌효과 (무료)
+python main.py render projects/my_project --ai 1,5,10-12 --bgm bgm.mp3
+python main.py render projects/my_project --narration file --narration-file voice.mp3
+```
+
+- 실행 전에 AI 장면 수와 **예상 비용**을 보여 주고 확인을 받습니다(`-y`로 생략).
+- `--model`로 Grok 모델 ID(기본 `grok-imagine-video`), `--max-sec`로 AI 클립 최대 길이를 바꿀 수 있습니다.
+- ffmpeg이 필요합니다(윈도우 `winget install ffmpeg`, 맥 `brew install ffmpeg`). Streamlit Cloud는 `packages.txt`로 자동 설치됩니다.
+- Streamlit Cloud Secrets에 `XAI_API_KEY = "..."`를 넣으면 앱에 자동 입력됩니다.
+- 클라우드 서버는 CPU·메모리가 작아 긴 영상은 느릴 수 있고, 폰 화면이 꺼지면 작업이 끊길 수 있습니다. 롱폼은 PC 명령어 실행을 권장합니다.

@@ -1080,3 +1080,97 @@ if ss.scenes:
     d3.download_button("⬇️ 자막/타임코드 SRT", make_srt(ss.scenes), "scenes.srt", "application/x-subrip",
                        width="stretch")
     autosave()
+
+    # ───────────────────────── 6. 영상 만들기 ─────────────────────────
+    st.divider()
+    st.subheader("🎬 6. 영상 만들기 (Grok AI 영상 + 줌효과 → 완성 mp4)")
+    for _k, _v in {"xai_key": _secret("XAI_API_KEY"), "v_ai": "30%", "v_model": "grok-imagine-video",
+                   "v_max": 10, "v_price": 0.07, "v_narr": "Gemini TTS", "v_voice": "Kore",
+                   "v_height": 720, "v_bgm_vol": 0.12}.items():
+        ss.setdefault(_k, _v)
+    v1, v2, v3 = st.columns(3)
+    v1.text_input("xAI API 키", type="password", key="xai_key",
+                  help="저장되지 않습니다. 환경변수/Secrets의 XAI_API_KEY가 있으면 자동 입력됩니다.")
+    v1.text_input("AI 영상으로 만들 장면", key="v_ai",
+                  help="30% = 첫 장면 포함 고르게 30%, all = 전부, none = 전부 줌효과, 1,3,5-8 = 번호 지정. "
+                       "나머지 장면은 무료 줌·패닝 효과로 만듭니다.")
+    v2.text_input("Grok 영상 모델 ID", key="v_model")
+    v2.number_input("AI 클립 최대 길이(초)", 1, 15, key="v_max",
+                    help="장면이 더 길면 천천히 재생 + 마지막 장면에 줌효과를 이어 붙여 채웁니다.")
+    v3.number_input("견적용 초당 가격($)", 0.0, 1.0, step=0.01, key="v_price", format="%.3f")
+    v3.selectbox("해상도", [720, 1080], key="v_height", format_func=lambda x: f"{x}p")
+    n1, n2 = st.columns(2)
+    n1.radio("내레이션", ["Gemini TTS", "내 음성 파일", "없음"], key="v_narr", horizontal=True,
+             help="TTS를 쓰면 실제 읽는 길이에 맞춰 장면 길이와 자막 시간이 자동 조정됩니다.")
+    if ss.v_narr == "Gemini TTS":
+        n1.text_input("TTS 목소리", key="v_voice", help="예: Kore, Charon, Puck, Aoede, Fenrir")
+    narr_up = n1.file_uploader("내 음성 파일", type=["mp3", "wav", "m4a"]) if ss.v_narr == "내 음성 파일" else None
+    bgm_up = n2.file_uploader("배경음악 (선택, 반복 재생)", type=["mp3", "wav", "m4a"])
+    n2.slider("배경음악 볼륨", 0.0, 0.5, step=0.01, key="v_bgm_vol")
+
+    try:
+        from video_auto.render import plan as v_plan, render as v_render
+        save_project()
+        est = v_plan(project_dir(), ss.v_ai, int(ss.v_max), float(ss.v_price))
+        if est["missing_images"] and any(s.get("image") for s in ss.scenes):
+            save_project(full=True)  # 자동 저장을 꺼 둔 경우 이미지 파일을 디스크에 기록
+            est = v_plan(project_dir(), ss.v_ai, int(ss.v_max), float(ss.v_price))
+        st.caption(f"AI 영상 {len(est['ai_scenes'])}개 장면 · 요청 {est['ai_seconds']}초 → 예상 비용 약 "
+                   f"${est['est_cost']} (초당 ${ss.v_price} 가정, 실제 요금은 xAI 콘솔에서 확인) · "
+                   f"나머지 {est['scenes'] - len(est['ai_scenes'])}개는 무료 줌효과")
+        if est["missing_images"]:
+            st.warning(f"이미지가 없는 장면이 있어 영상을 만들 수 없습니다: {est['missing_images'][:20]}")
+        g1, g2, g3 = st.columns([1, 1, 2])
+        v_test_no = g1.number_input("테스트 장면", 1, len(ss.scenes), key="v_test_no")
+        v_test = g2.button("🧪 이 장면만 AI 영상 테스트", width="stretch")
+        v_go = g3.button("🎬 완성 영상 만들기", type="primary", width="stretch",
+                         disabled=bool(est["missing_images"]))
+        if v_test or v_go:
+            if (v_test or est["ai_scenes"]) and not ss.xai_key:
+                st.error("xAI API 키를 입력하세요.")
+            elif v_go and ss.v_narr == "Gemini TTS" and not api_key:
+                st.error("TTS에는 사이드바의 Gemini API 키가 필요합니다.")
+            elif v_go and ss.v_narr == "내 음성 파일" and not narr_up:
+                st.error("음성 파일을 올리세요.")
+            else:
+                adir = project_dir() / "audio"
+                adir.mkdir(parents=True, exist_ok=True)
+
+                def _keep(up):
+                    if not up:
+                        return None
+                    f = adir / safe_name(Path(up.name).stem)
+                    f = f.with_suffix(Path(up.name).suffix.lower())
+                    f.write_bytes(up.getvalue())
+                    return f
+                vbar = st.progress(0.0, text="영상 준비 중…")
+                res = v_render(
+                    project_dir(), xai_key=ss.xai_key, gemini_key=api_key,
+                    ai_spec=str(int(v_test_no)) if v_test else ss.v_ai, grok_model=ss.v_model,
+                    grok_max_sec=int(ss.v_max),
+                    grok_extra={"resolution": "1080p"} if ss.v_height == 1080 else None,
+                    narration={"Gemini TTS": "tts", "내 음성 파일": "file"}.get(ss.v_narr, "none"),
+                    narration_file=_keep(narr_up), tts_voice=ss.v_voice, bgm_file=_keep(bgm_up),
+                    bgm_volume=float(ss.v_bgm_vol), height=int(ss.v_height), workers=workers,
+                    only=[int(v_test_no)] if v_test else None,
+                    progress=lambda stage, d, t: vbar.progress(min(1.0, d / max(1, t)), text=f"{stage} {d}/{t}"))
+                vbar.empty()
+                for k, msg in sorted(res["ai_failed"].items()):
+                    st.warning(f"#{k} AI 영상 실패 → 줌효과로 대체: {msg}")
+                ss.v_result = res
+    except Exception as e:  # noqa: BLE001
+        st.error(f"영상 만들기 오류: {e}")
+
+    vr = ss.get("v_result")
+    if vr:
+        if vr.get("output") and Path(vr["output"]).exists():
+            st.success(f"완성: {fmt_time(vr['duration'])} · {vr['size']} · AI 영상 {len(vr['ai_ok'])}개 장면")
+            st.video(vr["output"])
+            o1, o2 = st.columns(2)
+            o1.download_button("⬇️ 완성 영상 MP4", Path(vr["output"]).read_bytes(), "final.mp4", "video/mp4",
+                               width="stretch")
+            o2.download_button("⬇️ 실제 타이밍 자막 SRT", Path(vr["srt"]).read_bytes(), "final.srt",
+                               "application/x-subrip", width="stretch")
+        elif vr.get("clips") and Path(vr["clips"][0]).exists():
+            st.caption("테스트 클립")
+            st.video(vr["clips"][0])
