@@ -614,6 +614,78 @@ def _regen_inline(img_slot, sc):
     _paint_image(img_slot, sc, False)
 
 
+_GEN_KEYS = ("prompt", "desc", "motion", "psig", "gen_prompt", "error")  # 문장이 바뀌면 다시 써야 하는 것들
+
+
+def _renumber(scenes):
+    for i, sc in enumerate(scenes, 1):
+        sc["idx"] = i
+
+
+def _find_scene(idx):
+    return next((i for i, sc in enumerate(st.session_state.scenes) if sc["idx"] == idx), None)
+
+
+def _edit_scene(idx, parts):
+    """장면 idx의 문장을 parts로 바꾼다. parts가 둘 이상이면 그 개수만큼 장면으로 나눈다."""
+    ss_ = st.session_state
+    pos = _find_scene(idx)
+    if pos is None:
+        return
+    sc = ss_.scenes[pos]
+    if len(parts) == 1:
+        if parts[0] != sc["text"]:
+            sc["text"] = parts[0]
+            for k in _GEN_KEYS:  # 프롬프트는 새 문장으로 다시 쓰게 한다. 이미지는 그대로 두고 '수정됨'으로 표시
+                sc.pop(k, None)
+        return
+    total = sum(len(p) for p in parts) or 1
+    t, new = sc["start"], []
+    for p in parts:
+        dur = (sc["end"] - sc["start"]) * len(p) / total
+        new.append({"idx": 0, "start": t, "end": t + dur, "text": p})
+        t += dur
+    ss_.scenes[pos:pos + 1] = new  # 나뉜 장면은 새 문장이라 이미지·프롬프트 없이 시작
+    _renumber(ss_.scenes)
+    autosave(full=True)  # 번호가 바뀌었으니 저장된 이미지 파일도 다시 정리
+
+
+def _start_edit(idx):
+    ss_ = st.session_state
+    pos = _find_scene(idx)
+    if pos is None:
+        return
+    ss_.edit_idx = idx
+    ss_[f"edit_txt_{idx}"] = ss_.scenes[pos]["text"]
+
+
+def _cancel_edit():
+    st.session_state.edit_idx = None
+
+
+def _save_edit(idx):
+    ss_ = st.session_state
+    raw = ss_.get(f"edit_txt_{idx}", "")
+    parts = [p.strip() for p in re.split(r"[\r\n]+", raw) if p.strip()]
+    ss_.edit_idx = None
+    if parts:
+        _edit_scene(idx, parts)
+
+
+def _merge_next(idx):
+    """장면 idx를 바로 아래 장면과 합친다 (합쳐진 장면은 이미지·프롬프트 없이 새로 시작)."""
+    ss_ = st.session_state
+    pos = _find_scene(idx)
+    if pos is None or pos + 1 >= len(ss_.scenes):
+        return
+    a, b = ss_.scenes[pos], ss_.scenes[pos + 1]
+    ss_.scenes[pos:pos + 2] = [{"idx": 0, "start": a["start"], "end": b["end"],
+                                "text": f'{a["text"]} {b["text"]}'.strip()}]
+    _renumber(ss_.scenes)
+    ss_.edit_idx = None
+    autosave(full=True)
+
+
 _MIME = {"png": "image/png", "jpg": "image/jpeg", "webp": "image/webp"}
 
 
@@ -621,7 +693,9 @@ def render_scene_row(slot, sc, interactive: bool = False, busy: bool = False):
     """장면 카드: 왼쪽 이미지(+다운로드) | 오른쪽 SCENE·상태·NARRATION SCRIPT·IMAGE PROMPT·다시 만들기."""
     st_ = st.session_state
     portrait = st_.get("aspect") in ("9:16", "3:4")
-    if sc.get("image"):
+    if sc.get("image") and not sc.get("prompt"):
+        kind, label = "prog", "수정됨 · 다시 생성 필요"
+    elif sc.get("image"):
         kind, label = "done", "완성됨"
     elif sc.get("error"):
         kind, label = "fail", "실패"
@@ -646,16 +720,31 @@ def render_scene_row(slot, sc, interactive: bool = False, busy: bool = False):
                                    file_name=f'{scene_filename(sc, st_.get("name_rule", ""))}.{ext}',
                                    mime=_MIME.get(ext, "image/png"), key=f"dl_{sc['idx']}", width="stretch")
         with right:
-            st.markdown(
-                f'<div class="scene-head"><span><span class="scene-badge">SCENE {sc["idx"]}</span>'
-                f'</span>'
-                f'<span class="chip {kind}">{label}</span></div>'
-                f'<div class="lbl">NARRATION SCRIPT</div><div class="scene-script">{script_html}</div>{prompt_html}{motion_html}',
-                unsafe_allow_html=True)
-            btn = (":material/refresh: 이 장면 다시 만들기" if sc.get("image")
-                   else ":material/auto_awesome: 이 장면 생성")
-            if interactive and st.button(btn, key=f"regen_{sc['idx']}", width="stretch"):
-                _regen_inline(img_slot, sc)
+            head = (f'<div class="scene-head"><span><span class="scene-badge">SCENE {sc["idx"]}</span>'
+                    f'</span><span class="chip {kind}">{label}</span></div>')
+            if interactive and st_.get("edit_idx") == sc["idx"]:
+                st.markdown(head + '<div class="lbl">NARRATION SCRIPT · 수정</div>', unsafe_allow_html=True)
+                st.text_area("문장 수정", key=f"edit_txt_{sc['idx']}", height=130, label_visibility="collapsed")
+                st.caption("나누고 싶은 곳에서 Enter(줄바꿈)를 누르고 저장하면 그 위치에서 장면이 나뉩니다.")
+                c1, c2 = st.columns(2)
+                c1.button(":material/check: 저장", key=f"save_{sc['idx']}", on_click=_save_edit,
+                          args=(sc["idx"],), type="primary", width="stretch")
+                c2.button(":material/close: 취소", key=f"cancel_{sc['idx']}", on_click=_cancel_edit, width="stretch")
+            else:
+                st.markdown(
+                    head + f'<div class="lbl">NARRATION SCRIPT</div><div class="scene-script">{script_html}</div>'
+                    f'{prompt_html}{motion_html}', unsafe_allow_html=True)
+                if interactive:
+                    e1, e2 = st.columns(2)
+                    e1.button(":material/edit: 수정 · 나누기", key=f"edit_{sc['idx']}", on_click=_start_edit,
+                              args=(sc["idx"],), width="stretch")
+                    if sc["idx"] < len(st_.scenes):
+                        e2.button(":material/merge: 아래와 합치기", key=f"merge_{sc['idx']}", on_click=_merge_next,
+                                  args=(sc["idx"],), width="stretch")
+                    btn = (":material/refresh: 이 장면 다시 만들기" if sc.get("image")
+                           else ":material/auto_awesome: 이 장면 생성")
+                    if st.button(btn, key=f"regen_{sc['idx']}", width="stretch"):
+                        _regen_inline(img_slot, sc)
 
 
 def render_rows(container, scenes, interactive: bool = False):
@@ -785,6 +874,7 @@ hr { border-color: var(--line) !important; }
     font-weight: 600; }
 [class*="st-key-regen_"] button:hover { background: #46393a !important; border-color: #46393a !important; }
 [class*="st-key-regen_"] [data-testid="stIconMaterial"] { color: var(--cta); }
+[class*="st-key-edit_"] button, [class*="st-key-merge_"] button { min-height: 2.2rem; font-size: .85rem; }
 [class*="st-key-stop_btn"] button { background: #fff !important; color: #b4443a !important; border: 1px solid #efc9c4 !important; }
 [class*="st-key-stop_btn"] button:hover { background: #fdeeed !important; border-color: #e5a9a2 !important; }
 </style>
@@ -826,7 +916,7 @@ DEFAULTS = {"script": "", "format_prompt": DEFAULT_FORMAT_PROMPT, "style": JIGU_
             "aspect": "16:9", "sec": 5, "cps": 7.0, "lang": "언어 없음", "workers": 4,
             "api_key": _default_api_key(), "project_name": "my_project", "autosave": True,
             "motion_rule": DEFAULT_MOTION_RULE, "name_rule": list(NAME_RULES)[0], "zip_motion": False, "silent_rule": SILENT_DIRECTIVE, "motion_auto": True, "new_preset_name": "", "load_choice": "(선택)",
-            "log": [], "analysis": None, "analysis_hash": None, "scenes": [], "total_sec": 0.0, "refs": [],
+            "log": [], "edit_idx": None, "analysis": None, "analysis_hash": None, "scenes": [], "total_sec": 0.0, "refs": [],
             **{f"mid_{k}": v for k, v in IMAGE_MODELS.items()}}
 for _k, _v in DEFAULTS.items():
     ss.setdefault(_k, _v)
@@ -1129,6 +1219,7 @@ def do_split():
     log(f"본문을 분할하는 중… ({_nsp(script):,}자, 장면당 {sec_per_scene}초 목표)")
     scenes, total = split_script(script, sec_per_scene, cps)
     ss.scenes, ss.total_sec = scenes, total
+    ss.edit_idx = None
     ss.split_sig = (script_hash(script), sec_per_scene, cps)
     log(f"총 {len(scenes)}개 장면으로 분할 완료")
     autosave(full=True)
