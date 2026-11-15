@@ -6,6 +6,7 @@
 """
 import csv
 import hmac
+import html
 import io
 import json
 import math
@@ -418,8 +419,10 @@ def generate_one(client, model: str, prompt: str, aspect: str, refs, throttle: T
 
 
 def run_parallel(client, model, aspect, targets, workers, on_done, refs, throttle):
-    """완료되는 순서대로 on_done(scene_idx, bytes, err) 호출 (메인 스레드)."""
-    with ThreadPoolExecutor(max_workers=workers) as ex:
+    """완료되는 순서대로 on_done(scene_idx, bytes, err) 호출 (메인 스레드).
+    사용자가 중단하면(스크립트가 중단되면) 아직 시작하지 않은 장면은 취소한다."""
+    ex = ThreadPoolExecutor(max_workers=workers)
+    try:
         futs = {ex.submit(generate_one, client, model, s["gen_prompt"], aspect, refs, throttle): s["idx"]
                 for s in targets}
         for f in as_completed(futs):
@@ -429,6 +432,11 @@ def run_parallel(client, model, aspect, targets, workers, on_done, refs, throttl
             except Exception as e:  # noqa: BLE001
                 img, err = None, str(e)[:300]
             on_done(idx, img, err)
+    except BaseException:
+        ex.shutdown(wait=False, cancel_futures=True)  # 대기 중인 장면 취소 후 중단을 그대로 전달
+        raise
+    finally:
+        ex.shutdown(wait=False)
 
 
 # ───────────────────────── 파일 입출력 (자동 저장/프리셋) ─────────────────────────
@@ -468,9 +476,11 @@ def _paint_image(img_slot, sc, busy: bool):
         elif sc.get("error"):
             st.markdown('<div class="ph fail">⚠️<br>생성 실패</div>', unsafe_allow_html=True)
             st.caption(sc["error"][:140])
+        elif busy:
+            st.markdown('<div class="ph busy">🔄<br>이미지 생성 중…<br><small>GENERATING AI VISION</small></div>',
+                        unsafe_allow_html=True)
         else:
-            msg = "🔄<br>생성 중…" if busy else "🖼️<br>아직 만들지 않음"
-            st.markdown(f'<div class="ph">{msg}</div>', unsafe_allow_html=True)
+            st.markdown('<div class="ph">🖼️<br>아직 만들지 않음</div>', unsafe_allow_html=True)
 
 
 def _regen_inline(img_slot, sc):
@@ -480,7 +490,8 @@ def _regen_inline(img_slot, sc):
         st.error("사이드바에 Gemini API 키를 입력하세요.")
         return
     with img_slot.container():
-        st.markdown('<div class="ph">🔄<br>다시 생성 중…</div>', unsafe_allow_html=True)
+        st.markdown('<div class="ph busy">🔄<br>다시 생성 중…<br><small>GENERATING AI VISION</small></div>',
+                    unsafe_allow_html=True)
     sc["gen_prompt"] = compose_gen_prompt(sc)
     img, err = generate_one(get_client(st_.api_key), st_[f"mid_{st_.model_label}"], sc["gen_prompt"],
                             st_.aspect, st_.refs, Throttle(1))
@@ -489,36 +500,48 @@ def _regen_inline(img_slot, sc):
         sc.pop("error", None)
         if st_.get("autosave"):
             save_image(sc)
-    else:
-        sc["error"] = err
-        st.toast(f"#{sc['idx']} 재생성 실패: {(err or '')[:80]}")
+        st.rerun()  # 다운로드 버튼 등이 새 이미지를 가리키도록 화면을 새로 그린다
+    sc["error"] = err
+    st.toast(f"#{sc['idx']} 재생성 실패: {(err or '')[:80]}")
     _paint_image(img_slot, sc, False)
 
 
+_MIME = {"png": "image/png", "jpg": "image/jpeg", "webp": "image/webp"}
+
+
 def render_scene_row(slot, sc, interactive: bool = False, busy: bool = False):
-    """장면 카드: 왼쪽 이미지 | 오른쪽 SCENE 번호·상태·SCRIPT(대본)·다시 생성 버튼."""
-    portrait = st.session_state.get("aspect") in ("9:16", "3:4")
+    """장면 카드: 왼쪽 이미지(+다운로드) | 오른쪽 SCENE·상태·NARRATION SCRIPT·IMAGE PROMPT·다시 만들기."""
+    st_ = st.session_state
+    portrait = st_.get("aspect") in ("9:16", "3:4")
     if sc.get("image"):
-        kind, label = "done", "완료"
+        kind, label = "done", "완성됨"
     elif sc.get("error"):
         kind, label = "fail", "실패"
     elif busy:
-        kind, label = "prog", "생성 중"
+        kind, label = "prog", "엔진 가동 중…"
     else:
-        kind, label = "wait", "미생성"
+        kind, label = "wait", "대기 중"
+    script_html = html.escape(sc["text"]).replace("\n", "<br>")
+    prompt_html = (f'<div class="lbl">IMAGE PROMPT</div><div class="prompt-box">'
+                   f'{html.escape(sc.get("prompt", "")).replace(chr(10), "<br>")}</div>') if sc.get("prompt") else ""
     with slot.container(border=True):
         left, right = st.columns([2, 3] if portrait else [5, 4], vertical_alignment="center")
         with left:
             img_slot = st.empty()
             _paint_image(img_slot, sc, busy)
+            if interactive and sc.get("image"):
+                ext = img_ext(sc["image"])
+                st.download_button("⬇️ 고화질 다운로드", sc["image"],
+                                   file_name=f'{scene_filename(sc, st_.get("name_rule", ""))}.{ext}',
+                                   mime=_MIME.get(ext, "image/png"), key=f"dl_{sc['idx']}", width="stretch")
         with right:
             st.markdown(
                 f'<div class="scene-head"><span><span class="scene-badge">SCENE {sc["idx"]}</span>'
                 f'<span class="scene-time">{fmt_time(sc["start"])}~{fmt_time(sc["end"])}</span></span>'
-                f'<span class="chip {kind}">{label}</span></div><div class="lbl">SCRIPT</div>',
+                f'<span class="chip {kind}">{label}</span></div>'
+                f'<div class="lbl">NARRATION SCRIPT</div><div class="scene-script">{script_html}</div>{prompt_html}',
                 unsafe_allow_html=True)
-            st.write(sc["text"])
-            if interactive and st.button("🔄 다시 생성", key=f"regen_{sc['idx']}", width="stretch",
+            if interactive and st.button("🔄 이 장면 다시 만들기", key=f"regen_{sc['idx']}", width="stretch",
                                          disabled=not sc.get("prompt")):
                 _regen_inline(img_slot, sc)
 
@@ -643,6 +666,15 @@ hr { border-color: var(--line) !important; }
     background: var(--side); border: 1px dashed #d6cec7; border-radius: 10px; color: var(--muted);
     font-size: .95rem; text-align: center; line-height: 1.8; }
 .ph.fail { background: #fff4f2; border-color: #f0c4bd; color: #a33a2f; }
+.ph.busy { background: #3d3330; border: 1px solid #3d3330; color: #f1e8e4; font-weight: 600; }
+.ph small { letter-spacing: .16em; opacity: .6; font-size: .6rem; font-weight: 500; }
+.scene-script { font-size: 1.02rem; font-weight: 600; line-height: 1.65; color: var(--text); margin: .05rem 0 .7rem; }
+.prompt-box { background: var(--side); border: 1px solid var(--line); border-radius: 10px; padding: .6rem .75rem;
+    font-size: .74rem; line-height: 1.55; color: var(--muted); max-height: 128px; overflow-y: auto; margin-bottom: .7rem; }
+[class*="st-key-regen_"] button { background: #3d3330 !important; color: #fff !important; border-color: #3d3330 !important; }
+[class*="st-key-regen_"] button:hover { background: #5a4a46 !important; border-color: #5a4a46 !important; }
+[class*="st-key-stop_btn"] button { background: #c9473c !important; color: #fff !important; border-color: #c9473c !important; }
+[class*="st-key-stop_btn"] button:hover { background: #b03a30 !important; border-color: #b03a30 !important; }
 </style>
 """
 st.markdown(THEME_CSS, unsafe_allow_html=True)
@@ -872,8 +904,13 @@ if chars:
                f"텍스트 호출 약 {math.ceil(est_n / 15) + 1}회 · 이미지 생성 예상 약 {est_min:.1f}분 "
                f"(장당 {SEC_PER_IMAGE_GUESS}초 가정, 실제와 다를 수 있음)")
 
-run_all = st.button("🚀 전체 자동 실행", type="primary", width="stretch",
-                    help="분석 → 분할 → 프롬프트 → (움직임 프롬프트) → 이미지 생성을 한 번에 진행합니다.")
+_c1, _c2, _c3 = st.columns([3, 2, 1])
+run_all = _c1.button("🚀 전체 자동 실행", type="primary", width="stretch",
+                     help="분석 → 분할 → 프롬프트 → (움직임 프롬프트) → 이미지 생성을 한 번에 진행합니다.")
+run_preview = _c2.button("✂️ 장면 분할 미리보기", width="stretch",
+                         help="이미지를 만들기 전에 대본이 어떻게 나뉘는지 먼저 봅니다. (API 호출 없음)")
+stop = _c3.button("⏹ 중단", key="stop_btn", width="stretch",
+                  help="실행 중인 작업을 멈춥니다. 이미 만든 이미지는 남고, 진행 중이던 장이 끝나면 멈춥니다.")
 
 with st.expander("🎨 스타일 · 규칙 설정 (기본값으로 충분해요)"):
     tab_style, tab_rule, tab_motion, tab_ref = st.tabs(["스타일", "장면 묘사 규칙", "움직임 규칙", "레퍼런스 이미지"])
@@ -925,7 +962,7 @@ with st.expander("🧪 단계별 실행 · 테스트 · 재생성"):
     t4.checkbox("완료된 이미지도 모두 다시 생성", key="force_all")
 
 
-_any_run = any([run_all, run1, run2, run3, run4, run6, run_test, run_fail])
+_any_run = any([run_all, run_preview, run1, run2, run3, run4, run6, run_test, run_fail])
 if _any_run:
     ss.log = []
 if _any_run or ss.get("log"):
@@ -1079,7 +1116,10 @@ def do_images(only=None, force=False):
 
 
 try:
-    if run_all and need_key() and need_script():
+    if stop:
+        st.info("⏹ 작업을 중단했습니다. 이미 만들어진 이미지는 그대로 남아 있어요. "
+                "'4 이미지 생성'(단계별 실행)으로 이어서 만들 수 있습니다.")
+    elif run_all and need_key() and need_script():
         do_analyze(force=False)
         do_split()
         rewrite_prompts(None)
@@ -1088,7 +1128,7 @@ try:
         do_images()
     elif run1 and need_key() and need_script():
         do_analyze()
-    elif run2 and need_script():
+    elif (run2 or run_preview) and need_script():
         do_split()
     elif run3 and need_key() and need_script():
         do_prompts()
