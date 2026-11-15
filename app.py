@@ -27,7 +27,7 @@ IMAGE_MODELS = {
     "나노바나나 프로": "gemini-3-pro-image-preview",
     "나노바나나2": "gemini-3.1-flash-image-preview",
 }
-DEFAULT_TEXT_MODEL = "gemini-flash-latest"  # 최신 flash로 자동 연결되는 별칭 (모델이 단종돼도 덜 깨짐)
+DEFAULT_TEXT_MODEL = "gemini-3.8-flash"  # Google 오류 메시지가 권장한 모델. 없어지면 쓸 수 있는 다른 flash로 자동 전환
 ASPECT_RATIOS = ["16:9", "9:16", "1:1", "4:3", "3:4"]
 SCENE_SECONDS = [3, 4, 5, 6, 10, 15, 20]
 IMAGE_LANGS = {"한국어": "Korean (Hangul)", "일본어": "Japanese", "영어": "English", "언어 없음": None}
@@ -898,6 +898,8 @@ def load_project():
             continue
         if k == "name_rule" and v not in NAME_RULES:
             continue
+        if k == "text_model" and v == "gemini-2.5-flash":
+            v = DEFAULT_TEXT_MODEL  # 단종된 예전 기본 모델이 저장돼 있으면 새 기본값으로
         if k == "preset" and v not in options:
             v = CUSTOM_LABEL
         ss[k] = v
