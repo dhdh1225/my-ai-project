@@ -53,8 +53,11 @@ DEFAULT_MOTION_RULE = (
     "영어로, 장면당 1~2문장의 이미지-투-비디오용 움직임 지시문을 쓴다.\n"
     "- 카메라 움직임(천천히 확대/축소/좌우 이동)과 눈에 띄는 요소 1~2개의 절제된 움직임만 서술한다.\n"
     "- 원본 이미지의 2D 벡터 스타일, 선 굵기, 색감, 구도를 유지하고 새로운 인물·사물·글자를 추가하지 않는다.\n"
-    "- 지정된 장면 길이 안에 끝날 만큼만 움직이게 한다."
+    "- 지정된 장면 길이 안에 끝날 만큼만 움직이게 한다.\n"
+    "- 대사·음성·배경음악·효과음이 없는 무음 영상으로 지시한다."
 )
+SILENT_DIRECTIVE = ("No dialogue, no speech, no voiceover, no characters talking or lip-syncing, "
+                    "no background music, no sound effects. Silent video.")
 NAME_RULES = {
     "번호_시작시간 (001_00m05s)": "{n:03d}_{t}",
     "scene_번호 (scene_001)": "scene_{n:03d}",
@@ -69,7 +72,7 @@ PRESETS_FILE = Path("presets.json")
 
 # 프로젝트에 저장/복원하는 입력 위젯 키 (API 키는 저장하지 않음)
 INPUT_KEYS = ["script", "format_prompt", "style", "preset", "model_label", "text_model", "aspect",
-              "sec", "cps", "lang", "workers", "motion_rule", "name_rule"] + [f"mid_{k}" for k in IMAGE_MODELS]
+              "sec", "cps", "lang", "workers", "motion_rule", "name_rule", "silent_rule"] + [f"mid_{k}" for k in IMAGE_MODELS]
 
 
 # ───────────────────────── 유틸 ─────────────────────────
@@ -82,6 +85,14 @@ def lang_directive(lang: str) -> str:
     return ("Never add subtitles, captions, logos, watermarks or speech bubbles. "
             f"The only text allowed is minimal in-scene writing (signs, labels, inscriptions), "
             f"which must be written in {name} only and spelled correctly.")
+
+
+def ensure_silent(text: str, directive: str) -> str:
+    """움직임 프롬프트에 무음 지시문이 없으면 뒤에 붙인다 (이미 있으면 그대로)."""
+    text, directive = (text or "").strip(), (directive or "").strip()
+    if not text or not directive or directive.lower() in text.lower():
+        return text
+    return f"{text} {directive}"
 
 
 def fmt_time(sec: float) -> str:
@@ -462,7 +473,7 @@ def scene_filename(sc, rule: str) -> str:
                       d=max(1, round(sc["end"] - sc["start"])))
 
 
-def make_zip(scenes, rule: str = "", with_motion: bool = False) -> bytes:
+def make_zip(scenes, rule: str = "", with_motion: bool = False, silent: str = "") -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for s in scenes:
@@ -470,24 +481,24 @@ def make_zip(scenes, rule: str = "", with_motion: bool = False) -> bytes:
                 base = scene_filename(s, rule)
                 z.writestr(f'{base}.{img_ext(s["image"])}', s["image"])
                 if with_motion and s.get("motion"):
-                    z.writestr(f"{base}.txt", s["motion"])
+                    z.writestr(f"{base}.txt", ensure_silent(s["motion"], silent))
     return buf.getvalue()
 
 
-def make_csv(scenes) -> bytes:
+def make_csv(scenes, silent: str = "") -> bytes:
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["번호", "시작", "끝", "길이(초)", "대본", "이미지 프롬프트", "애니메이션 프롬프트", "상태"])
     for s in scenes:
         status = "성공" if s.get("image") else ("실패: " + s["error"] if s.get("error") else "미생성")
         w.writerow([s["idx"], fmt_time(s["start"]), fmt_time(s["end"]), max(1, round(s["end"] - s["start"])),
-                    s["text"], s.get("gen_prompt") or s.get("prompt", ""), s.get("motion", ""), status])
+                    s["text"], s.get("gen_prompt") or s.get("prompt", ""), ensure_silent(s.get("motion", ""), silent), status])
     return ("\ufeff" + buf.getvalue()).encode("utf-8")
 
 
-def make_motion_txt(scenes) -> bytes:
+def make_motion_txt(scenes, silent: str = "") -> bytes:
     out = [f'#{s["idx"]} ({fmt_time(s["start"])}~{fmt_time(s["end"])}, {max(1, round(s["end"] - s["start"]))}초)\n'
-           f'{s.get("motion", "")}\n' for s in scenes]
+           f'{ensure_silent(s.get("motion", ""), silent)}\n' for s in scenes]
     return "\n".join(out).encode("utf-8")
 
 
@@ -517,7 +528,7 @@ DEFAULTS = {"script": "", "format_prompt": DEFAULT_FORMAT_PROMPT, "style": JIGU_
             "preset": "지구박물관 (기본)", "model_label": "나노바나나 프로", "text_model": DEFAULT_TEXT_MODEL,
             "aspect": "16:9", "sec": 5, "cps": 7.0, "lang": "언어 없음", "workers": 4,
             "api_key": _default_api_key(), "project_name": "my_project", "autosave": True,
-            "force_all": False, "motion_rule": DEFAULT_MOTION_RULE, "name_rule": list(NAME_RULES)[0], "zip_motion": False, "motion_auto": True, "test_no": 1, "edit_k": 1, "new_preset_name": "", "load_choice": "(선택)",
+            "force_all": False, "motion_rule": DEFAULT_MOTION_RULE, "name_rule": list(NAME_RULES)[0], "zip_motion": False, "silent_rule": SILENT_DIRECTIVE, "motion_auto": True, "test_no": 1, "edit_k": 1, "new_preset_name": "", "load_choice": "(선택)",
             "analysis": None, "analysis_hash": None, "scenes": [], "total_sec": 0.0, "refs": [], "editor_ver": 0,
             **{f"mid_{k}": v for k, v in IMAGE_MODELS.items()}}
 for _k, _v in DEFAULTS.items():
@@ -711,6 +722,8 @@ with col_b:
     format_prompt = ss.format_prompt
     st.text_area("🎞️ 애니메이션 지시 규칙 (움직임 프롬프트가 따를 규칙)", height=120, key="motion_rule")
     motion_rule = ss.motion_rule
+    st.text_input("🔇 항상 붙일 무음 지시문 (대사·배경음악 없음)", key="silent_rule",
+                  help="모든 애니메이션 프롬프트 끝에 자동으로 붙습니다. 표에서 지워도 내보낼 때 다시 붙습니다.")
 
     options = list(BUILTIN_PRESETS) + list(load_custom_presets()) + [CUSTOM_LABEL]
     if ss.preset not in options:
@@ -828,7 +841,8 @@ def do_motion(only_ids=None):
     res = build_motion_prompts(get_client(api_key), text_model, ss.analysis, targets, motion_rule,
                                progress_cb=lambda d, t: bar.progress(d / t, text=f"애니메이션 프롬프트 {d}/{t}"))
     for s in targets:
-        s["motion"] = res.get(s["idx"]) or "Slow gentle zoom in, subtle ambient movement, keep the illustration style unchanged."
+        base = res.get(s["idx"]) or "Slow gentle zoom in, subtle ambient movement, keep the illustration style unchanged."
+        s["motion"] = ensure_silent(base, ss.silent_rule)
     bar.empty()
     bump()
     autosave()
@@ -982,12 +996,12 @@ if ss.scenes:
 
     d1, d2, d3, d4 = st.columns(4)
     if any(s.get("image") for s in ss.scenes):
-        d1.download_button("⬇️ 이미지 ZIP", make_zip(ss.scenes, ss.name_rule, ss.zip_motion), "images.zip",
+        d1.download_button("⬇️ 이미지 ZIP", make_zip(ss.scenes, ss.name_rule, ss.zip_motion, ss.silent_rule), "images.zip",
                            "application/zip", width="stretch")
     if any(s.get("motion") for s in ss.scenes):
-        d4.download_button("⬇️ 애니메이션 프롬프트 TXT", make_motion_txt(ss.scenes), "motion_prompts.txt",
+        d4.download_button("⬇️ 애니메이션 프롬프트 TXT", make_motion_txt(ss.scenes, ss.silent_rule), "motion_prompts.txt",
                            "text/plain", width="stretch")
-    d2.download_button("⬇️ 장면/프롬프트 CSV", make_csv(ss.scenes), "scenes.csv", "text/csv", width="stretch")
+    d2.download_button("⬇️ 장면/프롬프트 CSV", make_csv(ss.scenes, ss.silent_rule), "scenes.csv", "text/csv", width="stretch")
     d3.download_button("⬇️ 자막/타임코드 SRT", make_srt(ss.scenes), "scenes.srt", "application/x-subrip",
                        width="stretch")
     autosave()
