@@ -531,7 +531,7 @@ def render_scene_row(slot, sc, interactive: bool = False, busy: bool = False):
             _paint_image(img_slot, sc, busy)
             if interactive and sc.get("image"):
                 ext = img_ext(sc["image"])
-                st.download_button("⬇️ 고화질 다운로드", sc["image"],
+                st.download_button(":material/download: 고화질 다운로드", sc["image"],
                                    file_name=f'{scene_filename(sc, st_.get("name_rule", ""))}.{ext}',
                                    mime=_MIME.get(ext, "image/png"), key=f"dl_{sc['idx']}", width="stretch")
         with right:
@@ -541,7 +541,7 @@ def render_scene_row(slot, sc, interactive: bool = False, busy: bool = False):
                 f'<span class="chip {kind}">{label}</span></div>'
                 f'<div class="lbl">NARRATION SCRIPT</div><div class="scene-script">{script_html}</div>{prompt_html}',
                 unsafe_allow_html=True)
-            if interactive and st.button("🔄 이 장면 다시 만들기", key=f"regen_{sc['idx']}", width="stretch",
+            if interactive and st.button(":material/refresh: 이 장면 다시 만들기", key=f"regen_{sc['idx']}", width="stretch",
                                          disabled=not sc.get("prompt")):
                 _regen_inline(img_slot, sc)
 
@@ -612,6 +612,7 @@ THEME_CSS = """
   --text: #3d3330;          /* 글씨 (따뜻한 차콜) */
   --muted: #8a7a76;         /* 보조 글씨 */
   --line: #e6e0db;          /* 테두리 (웜그레이) */
+  --ink: #2f2724;           /* 주요 버튼 (딥 차콜) */
 }
 html, body, .stApp, .stApp *:not([data-testid="stIconMaterial"]):not([class*="material" i]):not([class*="icon" i]) {
   font-family: 'Pretendard', -apple-system, 'Segoe UI', 'Noto Sans KR', sans-serif; }
@@ -622,16 +623,22 @@ h1, h2, h3 { color: var(--text) !important; letter-spacing: -0.02em; font-weight
 h1 { border-bottom: 3px solid var(--soft); padding-bottom: .35rem; display: inline-block; }
 [data-testid="stCaptionContainer"], .stCaption { color: var(--muted) !important; }
 
-/* 버튼 */
-.stButton > button, .stDownloadButton > button {
-    background: #fff; color: var(--text); border: 1px solid var(--line); border-radius: 10px;
-    transition: all .15s ease; font-weight: 500; }
-.stButton > button:hover, .stDownloadButton > button:hover {
-    background: var(--side); border-color: var(--accent); color: var(--accent-deep); }
-.stButton > button[kind="primary"] {
-    background: var(--cta); color: #4a241d; border: 1px solid var(--cta); font-weight: 600;
-    box-shadow: 0 2px 8px rgba(217, 149, 138, .28); }
-.stButton > button[kind="primary"]:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+/* 버튼: 흰색(보조) · 차콜(주요/카드) · 연한 레드(중단) */
+.stButton button, .stDownloadButton button {
+    min-height: 2.6rem; padding: .4rem 1rem; border-radius: 10px;
+    background: #fff; color: var(--text); border: 1px solid var(--line);
+    font-weight: 500; font-size: .92rem; letter-spacing: -.01em;
+    box-shadow: 0 1px 2px rgba(61, 51, 48, .05);
+    transition: background .15s ease, border-color .15s ease, box-shadow .15s ease, transform .1s ease; }
+.stButton button:hover, .stDownloadButton button:hover {
+    background: #faf7f5; border-color: #cdbfb8; color: var(--text); box-shadow: 0 2px 8px rgba(61, 51, 48, .08); }
+.stButton button:active, .stDownloadButton button:active { transform: translateY(1px); box-shadow: none; }
+.stButton button:disabled { opacity: .45; }
+.stButton button[kind="primary"] {
+    background: var(--ink) !important; color: #fff !important; border: 1px solid var(--ink) !important;
+    min-height: 2.9rem; border-radius: 12px; font-weight: 600; box-shadow: 0 6px 16px rgba(47, 39, 36, .20); }
+.stButton button[kind="primary"]:hover { background: #46393a !important; border-color: #46393a !important; }
+.stButton button[kind="primary"] [data-testid="stIconMaterial"] { color: var(--cta); }
 
 /* 입력창 */
 textarea, input { background: #fff !important; color: var(--text) !important; }
@@ -653,7 +660,7 @@ hr { border-color: var(--line) !important; }
 /* 장면 카드 */
 [data-testid="stVerticalBlockBorderWrapper"] { border-color: var(--line) !important; border-radius: 14px !important; background: #fff; }
 .scene-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: .55rem; }
-.scene-badge { background: #3d3330; color: #fff; font-weight: 700; letter-spacing: .06em; font-size: .72rem;
+.scene-badge { background: var(--ink); color: #fff; font-weight: 700; letter-spacing: .06em; font-size: .72rem;
     padding: .28rem .6rem; border-radius: 6px; }
 .scene-time { color: var(--muted); font-size: .8rem; margin-left: .6rem; }
 .chip { font-size: .75rem; padding: .2rem .7rem; border-radius: 999px; font-weight: 600; }
@@ -671,10 +678,12 @@ hr { border-color: var(--line) !important; }
 .scene-script { font-size: 1.02rem; font-weight: 600; line-height: 1.65; color: var(--text); margin: .05rem 0 .7rem; }
 .prompt-box { background: var(--side); border: 1px solid var(--line); border-radius: 10px; padding: .6rem .75rem;
     font-size: .74rem; line-height: 1.55; color: var(--muted); max-height: 128px; overflow-y: auto; margin-bottom: .7rem; }
-[class*="st-key-regen_"] button { background: #3d3330 !important; color: #fff !important; border-color: #3d3330 !important; }
-[class*="st-key-regen_"] button:hover { background: #5a4a46 !important; border-color: #5a4a46 !important; }
-[class*="st-key-stop_btn"] button { background: #c9473c !important; color: #fff !important; border-color: #c9473c !important; }
-[class*="st-key-stop_btn"] button:hover { background: #b03a30 !important; border-color: #b03a30 !important; }
+[class*="st-key-regen_"] button { background: var(--ink) !important; color: #fff !important; border-color: var(--ink) !important;
+    font-weight: 600; }
+[class*="st-key-regen_"] button:hover { background: #46393a !important; border-color: #46393a !important; }
+[class*="st-key-regen_"] [data-testid="stIconMaterial"] { color: var(--cta); }
+[class*="st-key-stop_btn"] button { background: #fff !important; color: #b4443a !important; border: 1px solid #efc9c4 !important; }
+[class*="st-key-stop_btn"] button:hover { background: #fdeeed !important; border-color: #e5a9a2 !important; }
 </style>
 """
 st.markdown(THEME_CSS, unsafe_allow_html=True)
@@ -698,7 +707,7 @@ def _default_api_key() -> str:
 # 배포 시 접근 제한: APP_PASSWORD가 설정돼 있으면 비밀번호를 맞혀야 앱이 열린다.
 _app_pw = _secret("APP_PASSWORD")
 if _app_pw and not ss.get("_authed"):
-    st.title("🔒 로그인")
+    st.title(":material/lock: 로그인")
     _pw = st.text_input("비밀번호", type="password")
     if _pw:
         if hmac.compare_digest(_pw.encode("utf-8"), _app_pw.encode("utf-8")):
@@ -844,7 +853,7 @@ def delete_preset():
 
 # ───────────────────────── 사이드바 ─────────────────────────
 with st.sidebar:
-    st.header("⚙️ 설정")
+    st.header(":material/settings: 설정")
     st.text_input("Gemini API 키", type="password", key="api_key",
                   help="저장되지 않습니다. 환경변수 GEMINI_API_KEY 또는 Streamlit secrets에 두면 자동 입력됩니다.")
     st.selectbox("이미지 모델", list(IMAGE_MODELS), key="model_label")
@@ -855,7 +864,7 @@ with st.sidebar:
                  help="기본은 '언어 없음'(글자·자막·로고 없음). 언어를 고르면 간판·비문 같은 장면 속 글자만 "
                       "해당 언어로 허용하고 자막·로고·말풍선은 계속 금지합니다.")
 
-    with st.expander("🔧 고급 설정"):
+    with st.expander(":material/tune: 고급 설정"):
         st.text_input("이미지 모델 ID", key=f"mid_{ss.model_label}", help="모델 ID가 바뀌면 여기서 수정하세요.")
         st.text_input("분석·프롬프트화 텍스트 모델", key="text_model")
         st.number_input("낭독 속도 (글자/초)", 3.0, 15.0, step=0.5, key="cps",
@@ -867,15 +876,15 @@ with st.sidebar:
                     help="이미지와 같은 이름의 .txt 파일로 들어갑니다.")
         st.checkbox("전체 자동 실행에 애니메이션 프롬프트 포함", key="motion_auto")
 
-    with st.expander("💾 프로젝트 저장 / 불러오기"):
+    with st.expander(":material/folder: 프로젝트 저장 / 불러오기"):
         st.text_input("프로젝트 이름", key="project_name", help="projects/<이름>/ 폴더에 저장됩니다.")
         st.checkbox("자동 저장", key="autosave", help="단계가 끝날 때마다, 이미지가 만들어질 때마다 저장합니다.")
         c_s, c_l = st.columns(2)
-        if c_s.button("지금 저장", width="stretch"):
+        if c_s.button(":material/save: 지금 저장", width="stretch"):
             save_project(full=True)
             st.toast("저장했습니다.")
         st.selectbox("불러올 프로젝트", ["(선택)"] + list_projects(), key="load_choice")
-        c_l.button("📂 불러오기", width="stretch", on_click=load_project)
+        c_l.button(":material/folder_open: 불러오기", width="stretch", on_click=load_project)
 
 api_key = ss.api_key
 model_label, text_model, aspect = ss.model_label, ss.text_model, ss.aspect
@@ -883,10 +892,10 @@ model_id = ss[f"mid_{model_label}"]
 sec_per_scene, cps, image_lang, workers = ss.sec, ss.cps, ss.lang, ss.workers
 
 # ───────────────────────── 메인 입력 ─────────────────────────
-st.title("🖼️ 대본 → 이미지 자동 생성기")
+st.title("대본 → 이미지 자동 생성기")
 st.caption("대본을 붙여 넣고 실행 버튼만 누르면 됩니다. 세부 설정은 기본값으로 충분합니다.")
 
-with st.expander("📄 .txt 파일로 대본 불러오기"):
+with st.expander(":material/description: .txt 파일로 대본 불러오기"):
     txt_file = st.file_uploader("대본 .txt", type=["txt"], label_visibility="collapsed")
     if txt_file is not None and ss.get("_txt_name") != (txt_file.name, txt_file.size):
         ss._txt_name = (txt_file.name, txt_file.size)
@@ -895,7 +904,7 @@ with st.expander("📄 .txt 파일로 대본 불러오기"):
         except UnicodeDecodeError:
             ss.script = txt_file.getvalue().decode("cp949", errors="replace")
 
-st.text_area("📜 대본", height=260, key="script", placeholder="여기에 대본을 붙여 넣으세요.")
+st.text_area("대본", height=260, key="script", placeholder="여기에 대본을 붙여 넣으세요.")
 script = ss.script
 chars, est_sec, est_n = estimate(script, sec_per_scene, cps)
 if chars:
@@ -905,14 +914,14 @@ if chars:
                f"(장당 {SEC_PER_IMAGE_GUESS}초 가정, 실제와 다를 수 있음)")
 
 _c1, _c2, _c3 = st.columns([3, 2, 1])
-run_all = _c1.button("🚀 전체 자동 실행", type="primary", width="stretch",
+run_all = _c1.button(":material/play_arrow: 전체 자동 실행", type="primary", width="stretch",
                      help="분석 → 분할 → 프롬프트 → (움직임 프롬프트) → 이미지 생성을 한 번에 진행합니다.")
-run_preview = _c2.button("✂️ 장면 분할 미리보기", width="stretch",
+run_preview = _c2.button(":material/content_cut: 장면 분할 미리보기", width="stretch",
                          help="이미지를 만들기 전에 대본이 어떻게 나뉘는지 먼저 봅니다. (API 호출 없음)")
-stop = _c3.button("⏹ 중단", key="stop_btn", width="stretch",
+stop = _c3.button(":material/stop_circle: 중단", key="stop_btn", width="stretch",
                   help="실행 중인 작업을 멈춥니다. 이미 만든 이미지는 남고, 진행 중이던 장이 끝나면 멈춥니다.")
 
-with st.expander("🎨 스타일 · 규칙 설정 (기본값으로 충분해요)"):
+with st.expander(":material/palette: 스타일 · 규칙 설정 (기본값으로 충분해요)"):
     tab_style, tab_rule, tab_motion, tab_ref = st.tabs(["스타일", "장면 묘사 규칙", "움직임 규칙", "레퍼런스 이미지"])
     with tab_style:
         options = list(BUILTIN_PRESETS) + list(load_custom_presets()) + [CUSTOM_LABEL]
@@ -924,13 +933,13 @@ with st.expander("🎨 스타일 · 규칙 설정 (기본값으로 충분해요)
         p1, p2, p3 = st.columns([2, 1, 1])
         p1.text_input("내 프리셋으로 저장할 이름", key="new_preset_name", label_visibility="collapsed",
                       placeholder="프리셋 이름 입력 후 저장")
-        p2.button("저장", on_click=save_preset, width="stretch")
-        p3.button("삭제", on_click=delete_preset, width="stretch", disabled=ss.preset not in load_custom_presets())
+        p2.button(":material/save: 저장", on_click=save_preset, width="stretch")
+        p3.button(":material/delete: 삭제", on_click=delete_preset, width="stretch", disabled=ss.preset not in load_custom_presets())
     with tab_rule:
         st.text_area("형식 이미지 프롬프트 (장면 묘사가 따를 규칙)", height=150, key="format_prompt")
     with tab_motion:
         st.text_area("애니메이션 지시 규칙 (움직임 프롬프트가 따를 규칙)", height=120, key="motion_rule")
-        st.text_input("🔇 항상 붙일 무음 지시문 (대사·배경음악 없음)", key="silent_rule",
+        st.text_input(":material/volume_off: 항상 붙일 무음 지시문 (대사·배경음악 없음)", key="silent_rule",
                       help="모든 애니메이션 프롬프트 끝에 자동으로 붙습니다. 표에서 지워도 내보낼 때 다시 붙습니다.")
     with tab_ref:
         ref_files = st.file_uploader(f"레퍼런스 이미지 (최대 {MAX_REFS}장, 인물·소품 일관성용)",
@@ -941,12 +950,12 @@ with st.expander("🎨 스타일 · 규칙 설정 (기본값으로 충분해요)
             rc = st.columns(len(ss.refs))
             for c, r in zip(rc, ss.refs):
                 c.image(r["data"], caption=r["name"][:12], width="stretch")
-            if st.button("레퍼런스 비우기"):
+            if st.button(":material/close: 레퍼런스 비우기"):
                 ss.refs = []
                 st.rerun()
 style, format_prompt, motion_rule = ss.style, ss.format_prompt, ss.motion_rule
 
-with st.expander("🧪 단계별 실행 · 테스트 · 재생성"):
+with st.expander(":material/science: 단계별 실행 · 테스트 · 재생성"):
     b1, b2, b3, b4, b5 = st.columns(5)
     run1 = b1.button("1 분석", width="stretch")
     run2 = b2.button("2 분할", width="stretch")
@@ -957,8 +966,8 @@ with st.expander("🧪 단계별 실행 · 테스트 · 재생성"):
     t1, t2, t3, t4 = st.columns([1, 1, 1, 1])
     ss.test_no = min(max(1, int(ss.test_no)), max(1, len(ss.scenes)))
     test_no = t1.number_input("테스트 장면 번호", 1, max(1, len(ss.scenes)), key="test_no")
-    run_test = t2.button("🧪 이 장면만 1장 테스트", width="stretch")
-    run_fail = t3.button("♻️ 실패 장면 전부 재생성", width="stretch")
+    run_test = t2.button(":material/science: 이 장면만 1장 테스트", width="stretch")
+    run_fail = t3.button(":material/refresh: 실패 장면 전부 재생성", width="stretch")
     t4.checkbox("완료된 이미지도 모두 다시 생성", key="force_all")
 
 
@@ -966,7 +975,7 @@ _any_run = any([run_all, run_preview, run1, run2, run3, run4, run6, run_test, ru
 if _any_run:
     ss.log = []
 if _any_run or ss.get("log"):
-    _log_box = st.expander("📜 진행 로그", expanded=_any_run).empty()
+    _log_box = st.expander(":material/terminal: 진행 로그", expanded=_any_run).empty()
 else:
     _log_box = None
 
@@ -1149,13 +1158,13 @@ except Exception as e:  # noqa: BLE001
 
 # ───────────────────────── 결과 표시 ─────────────────────────
 if ss.analysis:
-    with st.expander("📊 대본 분석 결과", expanded=False):
+    with st.expander(":material/insights: 대본 분석 결과", expanded=False):
         st.json(ss.analysis)
 
 if ss.scenes:
     n_img = sum(1 for s in ss.scenes if s.get("image"))
     st.subheader(f"장면 {len(ss.scenes)}개 · 이미지 {n_img}장 완료 · 추정 길이 {fmt_time(ss.total_sec)}")
-    tab_scenes, tab_images, tab_export = st.tabs(["🎬 장면 · 프롬프트", "🖼️ 이미지", "📦 내보내기"])
+    tab_scenes, tab_images, tab_export = st.tabs([":material/view_list: 장면 · 프롬프트", ":material/image: 이미지", ":material/download: 내보내기"])
 
     with tab_scenes:
         rows = [{"번호": s["idx"], "시간": f'{fmt_time(s["start"])}~{fmt_time(s["end"])}',
@@ -1168,17 +1177,17 @@ if ss.scenes:
             s["text"] = row["대본(수정 가능)"]
             s["motion"] = row["애니메이션 프롬프트(수정 가능)"]
 
-        with st.expander("✂️ 장면 합치기 / 나누기 · 선택 장면 프롬프트 재작성"):
+        with st.expander(":material/edit: 장면 합치기 / 나누기 · 선택 장면 프롬프트 재작성"):
             ids = [s["idx"] for s in ss.scenes]
             e1, e2, e3 = st.columns([1, 2, 2])
             ss.edit_k = min(max(1, int(ss.edit_k)), len(ids))
             k = e1.number_input("장면 번호", 1, len(ids), key="edit_k")
-            do_merge = e2.button("➕ 다음 장면과 합치기", width="stretch")
-            do_split_btn = e3.button("✂️ 이 장면 둘로 나누기", width="stretch")
+            do_merge = e2.button(":material/merge: 다음 장면과 합치기", width="stretch")
+            do_split_btn = e3.button(":material/call_split: 이 장면 둘로 나누기", width="stretch")
             pick_rw = st.multiselect("프롬프트를 다시 만들 장면", ids, key="rw_pick")
             r1, r2 = st.columns(2)
-            do_rw = r1.button("✍️ 선택 장면 이미지 프롬프트만 재작성 (이미지는 삭제됨)", width="stretch")
-            do_mo = r2.button("🎞️ 선택 장면 애니메이션 프롬프트만 재작성", width="stretch")
+            do_rw = r1.button(":material/edit_note: 선택 장면 이미지 프롬프트만 재작성 (이미지는 삭제됨)", width="stretch")
+            do_mo = r2.button(":material/movie: 선택 장면 애니메이션 프롬프트만 재작성", width="stretch")
             try:
                 changed = None
                 if do_merge:
@@ -1218,26 +1227,26 @@ if ss.scenes:
             render_rows(st.container(), ss.scenes, interactive=True)
             bad = [s["idx"] for s in ss.scenes if not s.get("image") and s.get("prompt")]
             pick = st.multiselect("다시 생성할 장면 번호", [s["idx"] for s in ss.scenes], default=bad)
-            if st.button("♻️ 선택 장면 재생성") and need_key():
+            if st.button(":material/refresh: 선택 장면 재생성") and need_key():
                 try:
                     do_images(only=set(pick))
                     st.rerun()
                 except Exception as e:  # noqa: BLE001
                     st.error(f"오류: {e}")
         else:
-            st.info("아직 만들어진 이미지가 없습니다. 위의 '🚀 전체 자동 실행'을 눌러 주세요.")
+            st.info("아직 만들어진 이미지가 없습니다. 위의 ':material/play_arrow: 전체 자동 실행'을 눌러 주세요.")
 
     with tab_export:
         d1, d2 = st.columns(2)
         if any(s.get("image") for s in ss.scenes):
-            d1.download_button("⬇️ 이미지 ZIP", make_zip(ss.scenes, ss.name_rule, ss.zip_motion, ss.silent_rule),
+            d1.download_button(":material/download: 이미지 ZIP", make_zip(ss.scenes, ss.name_rule, ss.zip_motion, ss.silent_rule),
                                "images.zip", "application/zip", width="stretch")
-        d2.download_button("⬇️ 장면/프롬프트 CSV", make_csv(ss.scenes, ss.silent_rule), "scenes.csv", "text/csv",
+        d2.download_button(":material/download: 장면/프롬프트 CSV", make_csv(ss.scenes, ss.silent_rule), "scenes.csv", "text/csv",
                            width="stretch")
         d3, d4 = st.columns(2)
-        d3.download_button("⬇️ 자막/타임코드 SRT", make_srt(ss.scenes), "scenes.srt", "application/x-subrip",
+        d3.download_button(":material/download: 자막/타임코드 SRT", make_srt(ss.scenes), "scenes.srt", "application/x-subrip",
                            width="stretch")
         if any(s.get("motion") for s in ss.scenes):
-            d4.download_button("⬇️ 애니메이션 프롬프트 TXT", make_motion_txt(ss.scenes, ss.silent_rule),
+            d4.download_button(":material/download: 애니메이션 프롬프트 TXT", make_motion_txt(ss.scenes, ss.silent_rule),
                                "motion_prompts.txt", "text/plain", width="stretch")
     autosave()
