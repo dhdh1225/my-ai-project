@@ -264,19 +264,15 @@ def _split_sentences(flat: str):
 
 def _units(text: str):
     """문장 단위로만 나눈다. 문장이 끝나는 곳(마침표 등)에서만 끊고, 문장 중간은 자르지 않는다.
-    줄바꿈은 문장 중간에 있을 수 있어서 공백으로 보고, 빈 줄(문단 구분)만 경계로 본다.
+    줄바꿈과 빈 줄은 문장 중간에 있을 수 있어서(복사하며 줄이 꺾인 대본 등) 경계로 보지 않고 공백으로 취급한다.
     문장 부호가 전혀 없고 줄이 여러 개인 대본만 예외로 줄을 문장으로 본다."""
-    out = []
-    for para in re.split(r"\n\s*\n", text.strip()):
-        para = para.strip()
-        if not para:
-            continue
-        lines = [ln.strip() for ln in para.split("\n") if ln.strip()]
-        if len(lines) >= 2 and not _SENT_END.search(para):
-            out.extend(lines)
-            continue
-        out.extend(_split_sentences(re.sub(r"\s*\n\s*", " ", para)))
-    return out
+    t = text.strip()
+    if not t:
+        return []
+    lines = [ln.strip() for ln in t.split("\n") if ln.strip()]
+    if len(lines) >= 2 and not _SENT_END.search(t):
+        return lines
+    return _split_sentences(re.sub(r"\s*\n\s*", " ", t))
 
 
 def _soft_units(text: str, max_len: int):
