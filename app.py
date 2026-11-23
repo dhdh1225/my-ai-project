@@ -224,13 +224,59 @@ def analyze_script(client, model: str, script: str) -> dict:
 
 
 # ───────────────────────── 2단계: 초 단위 분할 ─────────────────────────
-_SENT_SPLIT = re.compile(r'(?<=[.!?。…])\s+|(?<=[.!?。…]["\'”’)\]」』])\s+|\n+')
+_END_TOKEN = re.compile(r'[.!?。…]+["\'”’)\]」』]*')   # 문장 끝 부호 (+ 닫는 따옴표/괄호)
 _SENT_END = re.compile(r"[.!?。…]")
+_ELLIPSIS = re.compile(r'(?:\.{2,}|…+)["\'”’)\]」』]*$')
+_QUOTE_TAIL = re.compile(r'["\'”’)\]」』]$')
+# 닫는 따옴표 뒤에 문장이 이어지는 표현: "…다." 라고 말했다 / "정말?" 하고 물었다
+_QUOTE_CONT = re.compile(r"^(?:이?라(?:고|는|며|면서|서|니|도|면|던)|고(?:\s|$)|하(?:고|며|면서|는|던|여|면)|며(?:\s|$)|같은|처럼|인\s)")
+_DIGITS_ONLY_TAIL = re.compile(r"(?:^|\s)\d{1,4}$")
+
+
+def _split_sentences(flat: str):
+    """줄바꿈이 없는 한 문단을 문장으로 나눈다. 문장이 끝난 게 확실한 곳에서만 자른다.
+    말줄임표, 부호 뒤에 바로 글자가 이어지는 경우(3.5), 날짜·번호(2026. 11. 23. / 1. 항목),
+    따옴표 뒤에 이어지는 말(…." 라고 말했다)은 문장 중간으로 보고 자르지 않는다."""
+    cuts = []
+    for m in _END_TOKEN.finditer(flat):
+        end = m.end()
+        if end >= len(flat) or not flat[end].isspace():
+            continue  # 부호 바로 뒤에 글자가 이어짐 → 문장 중간
+        rest = flat[end:].lstrip()
+        if not rest:
+            continue
+        tok = m.group()
+        if _ELLIPSIS.search(tok):
+            continue  # 말줄임표는 쉬어 가는 곳일 뿐 문장의 끝이 아니다
+        if _DIGITS_ONLY_TAIL.search(flat[:m.start()]):
+            continue  # "2026. 11. 23." "1. 항목" 같은 숫자 뒤의 점
+        if _QUOTE_TAIL.search(tok) and _QUOTE_CONT.match(rest):
+            continue  # "…다." 라고 말했다
+        cuts.append(end)
+    pieces, prev = [], 0
+    for c in cuts + [len(flat)]:
+        seg = flat[prev:c].strip()
+        if seg:
+            pieces.append(seg)
+        prev = c
+    return pieces
 
 
 def _units(text: str):
-    """문장 단위로만 나눈다. 마침표(. ! ? 。 …)로 끝나는 지점에서만 끊고, 문장 중간은 자르지 않는다."""
-    return [u.strip() for u in _SENT_SPLIT.split(text) if u and u.strip()]
+    """문장 단위로만 나눈다. 문장이 끝나는 곳(마침표 등)에서만 끊고, 문장 중간은 자르지 않는다.
+    줄바꿈은 문장 중간에 있을 수 있어서 공백으로 보고, 빈 줄(문단 구분)만 경계로 본다.
+    문장 부호가 전혀 없고 줄이 여러 개인 대본만 예외로 줄을 문장으로 본다."""
+    out = []
+    for para in re.split(r"\n\s*\n", text.strip()):
+        para = para.strip()
+        if not para:
+            continue
+        lines = [ln.strip() for ln in para.split("\n") if ln.strip()]
+        if len(lines) >= 2 and not _SENT_END.search(para):
+            out.extend(lines)
+            continue
+        out.extend(_split_sentences(re.sub(r"\s*\n\s*", " ", para)))
+    return out
 
 
 def _soft_units(text: str, max_len: int):
@@ -1005,6 +1051,7 @@ def save_project(full: bool = False):
         d.mkdir(parents=True, exist_ok=True)
         data = {"version": 1, "inputs": {k: ss.get(k) for k in INPUT_KEYS}, "analysis": ss.analysis,
                 "analysis_hash": ss.analysis_hash, "total_sec": ss.total_sec,
+                "split_sig": list(ss.get("split_sig") or []),
                 "scenes": [{k: v for k, v in s.items() if k != "image"} for s in ss.scenes]}
         (d / "project.json").write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
         if full:
@@ -1076,6 +1123,12 @@ def load_project():
             s["image"] = p.read_bytes()
             break
     ss.scenes = scenes
+    # 어떤 대본·설정으로 나눈 장면인지 복원한다. (없으면 불러온 설정 기준으로 간주해서, 일괄 생성이 장면을 새로 나누지 않게)
+    sig = data.get("split_sig")
+    if sig:
+        ss.split_sig = tuple(sig)
+    elif scenes:
+        ss.split_sig = (script_hash(ss.get("script", "")), ss.get("sec"), ss.get("cps"))
     ss.refs = []
     if (d / "refs").exists():
         for p in sorted((d / "refs").iterdir())[:MAX_REFS]:
